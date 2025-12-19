@@ -1,9 +1,6 @@
 import { Hono } from "hono"
 import { cors } from "hono/cors"
 import { handle } from "hono/vercel"
-import { join, dirname } from "path"
-import { tmpdir } from "os"
-import { fileURLToPath } from "url"
 
 // =============================================================================
 // Types
@@ -136,12 +133,12 @@ async function renderDiffWithCritique(
   rows: number = 2000
 ): Promise<string> {
   // Write diff to temp file using Bun's native API
-  const tempFile = join(tmpdir(), `critique-${Date.now()}-${Math.random().toString(36).slice(2)}.patch`)
+  const tempFile = `/tmp/critique-${Date.now()}-${Math.random().toString(36).slice(2)}.patch`
   await Bun.write(tempFile, diff)
 
   try {
-    // Find the CLI path
-    const cliPath = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "cli.tsx")
+    // Find the CLI path using Bun's import.meta.dir
+    const cliPath = `${import.meta.dir}/../src/cli.tsx`
 
     // Use Bun.spawn to run the critique CLI
     const proc = Bun.spawn([
@@ -171,10 +168,12 @@ async function renderDiffWithCritique(
 
     return output
   } finally {
-    // Cleanup temp file
+    // Cleanup temp file using Bun
     try {
-      const { unlink } = await import("node:fs/promises")
-      await unlink(tempFile)
+      const file = Bun.file(tempFile)
+      if (await file.exists()) {
+        await Bun.$`rm ${tempFile}`.quiet()
+      }
     } catch {
       // Ignore cleanup errors
     }
