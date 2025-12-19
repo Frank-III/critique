@@ -7,15 +7,14 @@ import {
   useOnResize,
   useRenderer,
   useTerminalDimensions,
-} from "@opentui/react";
-import * as React from "react";
+} from "@opentui/solid";
+import { createSignal, createEffect, onMount, onCleanup, For, Show, type JSX } from "solid-js";
 import { exec, execSync } from "child_process";
 import { promisify } from "util";
 import { createCliRenderer, MacOSScrollAccel } from "@opentui/core";
 import fs from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { create } from "zustand";
 import Dropdown from "./dropdown.tsx";
 import * as watcher from "@parcel/watcher";
 import { debounce } from "./utils.ts";
@@ -72,17 +71,11 @@ class ScrollAcceleration {
   }
   reset() {
     this.macosAccel.reset();
-    // this.multiplier = 1;
   }
 }
 
-interface DiffState {
-  currentFileIndex: number;
-}
-
-const useDiffStore = create<DiffState>(() => ({
-  currentFileIndex: 0,
-}));
+// Simple reactive store using signals
+const [currentFileIndex, setCurrentFileIndex] = createSignal(0);
 
 interface AppProps {
   parsedFiles: Array<{
@@ -92,24 +85,22 @@ interface AppProps {
   }>;
 }
 
-function App({ parsedFiles }: AppProps) {
+function App(props: AppProps): JSX.Element {
   const { width: initialWidth } = useTerminalDimensions();
-  const [width, setWidth] = React.useState(initialWidth);
-  const [scrollAcceleration] = React.useState(() => new ScrollAcceleration());
-  const currentFileIndex = useDiffStore((s) => s.currentFileIndex);
-  const [showDropdown, setShowDropdown] = React.useState(false);
+  const [width, setWidth] = createSignal(initialWidth);
+  const scrollAcceleration = new ScrollAcceleration();
+  const [showDropdown, setShowDropdown] = createSignal(false);
 
-  useOnResize(
-    React.useCallback((newWidth: number) => {
-      setWidth(newWidth);
-    }, []),
-  );
-  const useSplitView = width >= 100;
+  useOnResize((newWidth: number) => {
+    setWidth(newWidth);
+  });
+
+  const useSplitView = () => width() >= 100;
 
   const renderer = useRenderer();
 
   useKeyboard((key) => {
-    if (showDropdown) {
+    if (showDropdown()) {
       if (key.name === "escape") {
         setShowDropdown(false);
       }
@@ -136,44 +127,39 @@ function App({ parsedFiles }: AppProps) {
       }
     }
     if (key.name === "left") {
-      useDiffStore.setState((state) => ({
-        currentFileIndex: Math.max(0, state.currentFileIndex - 1),
-      }));
+      setCurrentFileIndex((prev) => Math.max(0, prev - 1));
     }
     if (key.name === "right") {
-      useDiffStore.setState((state) => ({
-        currentFileIndex: Math.min(parsedFiles.length - 1, state.currentFileIndex + 1),
-      }));
+      setCurrentFileIndex((prev) => Math.min(props.parsedFiles.length - 1, prev + 1));
     }
   });
 
-  const { FileEditPreview } = require("./diff.tsx");
-
   // Ensure current index is valid
-  const validIndex = Math.min(currentFileIndex, parsedFiles.length - 1);
-  const currentFile = parsedFiles[validIndex];
+  const validIndex = () => Math.min(currentFileIndex(), props.parsedFiles.length - 1);
+  const currentFile = () => props.parsedFiles[validIndex()];
 
-  if (!currentFile) {
-    return (
-      <box style={{ padding: 1, backgroundColor: BACKGROUND_COLOR }}>
-        <text>No files to display</text>
-      </box>
-    );
-  }
-
-  const fileName = getFileName(currentFile);
+  const fileName = () => {
+    const file = currentFile();
+    return file ? getFileName(file) : "unknown";
+  };
 
   // Calculate additions and deletions
-  let additions = 0;
-  let deletions = 0;
-  currentFile.hunks.forEach((hunk: any) => {
-    hunk.lines.forEach((line: string) => {
-      if (line.startsWith("+")) additions++;
-      if (line.startsWith("-")) deletions++;
-    });
-  });
+  const stats = () => {
+    const file = currentFile();
+    if (!file) return { additions: 0, deletions: 0 };
 
-  const dropdownOptions = parsedFiles.map((file, idx) => {
+    let additions = 0;
+    let deletions = 0;
+    file.hunks.forEach((hunk: any) => {
+      hunk.lines.forEach((line: string) => {
+        if (line.startsWith("+")) additions++;
+        if (line.startsWith("-")) deletions++;
+      });
+    });
+    return { additions, deletions };
+  };
+
+  const dropdownOptions = () => props.parsedFiles.map((file, idx) => {
     const name = getFileName(file);
     return {
       title: name,
@@ -184,88 +170,96 @@ function App({ parsedFiles }: AppProps) {
 
   const handleFileSelect = (value: string) => {
     const index = parseInt(value, 10);
-    useDiffStore.setState({ currentFileIndex: index });
+    setCurrentFileIndex(index);
     setShowDropdown(false);
   };
 
-  if (showDropdown) {
-    return (
-      <box
-        style={{ flexDirection: "column", height: "100%", padding: 1, backgroundColor: BACKGROUND_COLOR }}
-      >
-        <box style={{ flexDirection: "column", justifyContent: "center", flexGrow: 1 }}>
-          <Dropdown
-            tooltip="Select file"
-            options={dropdownOptions}
-            selectedValues={[String(validIndex)]}
-            onChange={handleFileSelect}
-            placeholder="Search files..."
-          />
-        </box>
-      </box>
-    );
-  }
-
   return (
-    <box
-      key={String(useSplitView)}
-      style={{ flexDirection: "column", height: "100%", padding: 1, backgroundColor: BACKGROUND_COLOR }}
-    >
-      {/* Navigation header */}
-      <box style={{ paddingBottom: 1, paddingLeft: 1, paddingRight: 1, flexShrink: 0, flexDirection: "row", alignItems: "center" }}>
-        <text fg="#ffffff">←</text>
-        <box flexGrow={1} />
-        <text onMouseDown={() => setShowDropdown(true)}>
-          {fileName.trim()}
-        </text>
-        <text fg="#00ff00"> +{additions}</text>
-        <text fg="#ff0000">-{deletions}</text>
-        <box flexGrow={1} />
-        <text fg="#ffffff">→</text>
-      </box>
-
-      <scrollbox
-        scrollAcceleration={scrollAcceleration}
-        style={{
-          flexGrow: 1,
-          rootOptions: {
-            backgroundColor: "transparent",
-            border: false,
-          },
-
-          scrollbarOptions: {
-            showArrows: false,
-            trackOptions: {
-              foregroundColor: "#4a4a4a",
-              backgroundColor: "transparent",
-            },
-          },
-        }}
-        focused
-      >
-        <box style={{ flexDirection: "column" }}>
-          <FileEditPreview
-            hunks={currentFile.hunks}
-            paddingLeft={0}
-            splitView={useSplitView}
-            filePath={fileName}
-          />
+    <Show
+      when={currentFile()}
+      fallback={
+        <box style={{ padding: 1, backgroundColor: BACKGROUND_COLOR }}>
+          <text>No files to display</text>
         </box>
-      </scrollbox>
+      }
+    >
+      <Show
+        when={!showDropdown()}
+        fallback={
+          <box
+            style={{ flexDirection: "column", height: "100%", padding: 1, backgroundColor: BACKGROUND_COLOR }}
+          >
+            <box style={{ flexDirection: "column", justifyContent: "center", flexGrow: 1 }}>
+              <Dropdown
+                tooltip="Select file"
+                options={dropdownOptions()}
+                selectedValues={[String(validIndex())]}
+                onChange={handleFileSelect}
+                placeholder="Search files..."
+              />
+            </box>
+          </box>
+        }
+      >
+        <box
+          style={{ flexDirection: "column", height: "100%", padding: 1, backgroundColor: BACKGROUND_COLOR }}
+        >
+          {/* Navigation header */}
+          <box style={{ paddingBottom: 1, paddingLeft: 1, paddingRight: 1, flexShrink: 0, flexDirection: "row", alignItems: "center" }}>
+            <text fg="#ffffff">←</text>
+            <box flexGrow={1} />
+            <text onMouseDown={() => setShowDropdown(true)}>
+              {fileName().trim()}
+            </text>
+            <text fg="#00ff00"> +{stats().additions}</text>
+            <text fg="#ff0000">-{stats().deletions}</text>
+            <box flexGrow={1} />
+            <text fg="#ffffff">→</text>
+          </box>
 
-      {/* Bottom navigation */}
-      <box style={{ paddingTop: 1, paddingLeft: 1, paddingRight: 1, flexShrink: 0, flexDirection: "row", alignItems: "center" }}>
-        <text fg="#ffffff">←</text>
-        <text fg="#666666"> prev file</text>
-        <box flexGrow={1} />
-        <text fg="#ffffff">ctrl p</text>
-        <text fg="#666666"> select file </text>
-        <text fg="#666666">({validIndex + 1}/{parsedFiles.length})</text>
-        <box flexGrow={1} />
-        <text fg="#666666">next file </text>
-        <text fg="#ffffff">→</text>
-      </box>
-    </box>
+          <scrollbox
+            scrollAcceleration={scrollAcceleration}
+            style={{
+              flexGrow: 1,
+              rootOptions: {
+                backgroundColor: "transparent",
+                border: false,
+              },
+              scrollbarOptions: {
+                showArrows: false,
+                trackOptions: {
+                  foregroundColor: "#4a4a4a",
+                  backgroundColor: "transparent",
+                },
+              },
+            }}
+            focused
+          >
+            <box style={{ flexDirection: "column" }}>
+              <FileEditPreview
+                hunks={currentFile()!.hunks}
+                paddingLeft={0}
+                splitView={useSplitView()}
+                filePath={fileName()}
+              />
+            </box>
+          </scrollbox>
+
+          {/* Bottom navigation */}
+          <box style={{ paddingTop: 1, paddingLeft: 1, paddingRight: 1, flexShrink: 0, flexDirection: "row", alignItems: "center" }}>
+            <text fg="#ffffff">←</text>
+            <text fg="#666666"> prev file</text>
+            <box flexGrow={1} />
+            <text fg="#ffffff">ctrl p</text>
+            <text fg="#666666"> select file </text>
+            <text fg="#666666">({validIndex() + 1}/{props.parsedFiles.length})</text>
+            <box flexGrow={1} />
+            <text fg="#666666">next file </text>
+            <text fg="#ffffff">→</text>
+          </box>
+        </box>
+      </Show>
+    </Show>
   );
 }
 
@@ -295,14 +289,14 @@ cli
 
       const shouldWatch = options.watch && !ref && !options.commit;
 
-      function AppWithWatch() {
-        const [parsedFiles, setParsedFiles] = React.useState<Array<{
+      function AppWithWatch(): JSX.Element {
+        const [parsedFiles, setParsedFiles] = createSignal<Array<{
           oldFileName?: string;
           newFileName?: string;
           hunks: any[];
         }> | null>(null);
 
-        React.useEffect(() => {
+        onMount(() => {
           const fetchDiff = async () => {
             try {
               const { stdout: gitDiff } = await execAsync(gitCommand, {
@@ -342,77 +336,78 @@ cli
 
           fetchDiff();
 
-          if (!shouldWatch) {
-            return;
-          }
+          if (shouldWatch) {
+            const cwd = process.cwd();
 
-          const cwd = process.cwd();
+            const debouncedFetch = debounce(() => {
+              fetchDiff();
+            }, 200);
 
-          const debouncedFetch = debounce(() => {
-            fetchDiff();
-          }, 200);
+            let subscription: watcher.AsyncSubscription | undefined;
 
-          let subscription: watcher.AsyncSubscription | undefined;
+            watcher
+              .subscribe(cwd, (err, events) => {
+                if (err) {
+                  return;
+                }
 
-          watcher
-            .subscribe(cwd, (err, events) => {
-              if (err) {
-                return;
+                if (events.length > 0) {
+                  debouncedFetch();
+                }
+              })
+              .then((sub) => {
+                subscription = sub;
+              });
+
+            onCleanup(() => {
+              if (subscription) {
+                subscription.unsubscribe();
               }
-
-              if (events.length > 0) {
-                debouncedFetch();
-              }
-            })
-            .then((sub) => {
-              subscription = sub;
             });
-
-          return () => {
-            if (subscription) {
-              subscription.unsubscribe();
-            }
-          };
-        }, []);
+          }
+        });
 
         // Ensure currentFileIndex stays valid when files change
-        React.useEffect(() => {
-          if (parsedFiles && parsedFiles.length > 0) {
-            const currentIndex = useDiffStore.getState().currentFileIndex;
-            if (currentIndex >= parsedFiles.length) {
-              useDiffStore.setState({ currentFileIndex: parsedFiles.length - 1 });
+        createEffect(() => {
+          const files = parsedFiles();
+          if (files && files.length > 0) {
+            const idx = currentFileIndex();
+            if (idx >= files.length) {
+              setCurrentFileIndex(files.length - 1);
             }
           }
-        }, [parsedFiles]);
+        });
 
-        if (parsedFiles === null) {
-          return (
-            <box style={{ padding: 1, backgroundColor: BACKGROUND_COLOR }}>
-              <text>Loading...</text>
-            </box>
-          );
-        }
-
-        if (parsedFiles.length === 0) {
-          return (
-            <box style={{ padding: 1, backgroundColor: BACKGROUND_COLOR }}>
-              <text>No changes to display</text>
-            </box>
-          );
-        }
-
-        return <App parsedFiles={parsedFiles} />;
+        return (
+          <Show
+            when={parsedFiles() !== null}
+            fallback={
+              <box style={{ padding: 1, backgroundColor: BACKGROUND_COLOR }}>
+                <text>Loading...</text>
+              </box>
+            }
+          >
+            <Show
+              when={parsedFiles()!.length > 0}
+              fallback={
+                <box style={{ padding: 1, backgroundColor: BACKGROUND_COLOR }}>
+                  <text>No changes to display</text>
+                </box>
+              }
+            >
+              <App parsedFiles={parsedFiles()!} />
+            </Show>
+          </Show>
+        );
       }
 
       const { ErrorBoundary } = diffModule;
 
       const renderer = await createCliRenderer();
       createRoot(renderer).render(
-        React.createElement(
-          ErrorBoundary,
-          null,
-          React.createElement(AppWithWatch)
-        )
+        <ErrorBoundary>
+          <AppWithWatch />
+        </ErrorBoundary>
       );
     } catch (error) {
       console.error("Error getting git diff:", error);
@@ -457,11 +452,9 @@ cli
 
       const renderer = await createCliRenderer();
       createRoot(renderer).render(
-        React.createElement(
-          ErrorBoundary,
-          null,
-          React.createElement(App, { parsedFiles: [patch] })
-        )
+        <ErrorBoundary>
+          <App parsedFiles={[patch]} />
+        </ErrorBoundary>
       );
     } catch (error) {
       console.error("Error displaying diff:", error);
@@ -508,32 +501,20 @@ cli
         process.exit(0);
       }
 
-      interface PickState {
-        selectedFiles: Set<string>;
-        appliedFiles: Map<string, boolean>; // Track which files have patches applied
-        message: string;
-        messageType: "info" | "error" | "success" | "";
-      }
-
-      const usePickStore = create<PickState>(() => ({
-        selectedFiles: new Set(),
-        appliedFiles: new Map(),
-        message: "",
-        messageType: "",
-      }));
+      // Simple reactive store for pick state
+      const [selectedFiles, setSelectedFiles] = createSignal<Set<string>>(new Set());
+      const [appliedFiles, setAppliedFiles] = createSignal<Map<string, boolean>>(new Map());
+      const [message, setMessage] = createSignal("");
+      const [messageType, setMessageType] = createSignal<"info" | "error" | "success" | "">("");
 
       interface PickAppProps {
         files: string[];
         branch: string;
       }
 
-      function PickApp({ files, branch }: PickAppProps) {
-        const selectedFiles = usePickStore((s) => s.selectedFiles);
-        const message = usePickStore((s) => s.message);
-        const messageType = usePickStore((s) => s.messageType);
-
+      function PickApp(props: PickAppProps): JSX.Element {
         const handleChange = async (value: string) => {
-          const isSelected = selectedFiles.has(value);
+          const isSelected = selectedFiles().has(value);
 
           if (isSelected) {
             const { error } = execSyncWithError(
@@ -547,31 +528,31 @@ cli
                   fs.unlinkSync(value);
                 }
               } else {
-                usePickStore.setState({
-                  message: `Failed to restore ${value}: ${error}`,
-                  messageType: "error",
-                });
+                setMessage(`Failed to restore ${value}: ${error}`);
+                setMessageType("error");
                 return;
               }
             }
 
-            usePickStore.setState((state) => ({
-              selectedFiles: new Set(
-                Array.from(state.selectedFiles).filter((f) => f !== value),
-              ),
-              appliedFiles: new Map(
-                Array.from(state.appliedFiles).filter(([k]) => k !== value),
-              ),
-            }));
+            setSelectedFiles((prev) => {
+              const next = new Set(prev);
+              next.delete(value);
+              return next;
+            });
+            setAppliedFiles((prev) => {
+              const next = new Map(prev);
+              next.delete(value);
+              return next;
+            });
           } else {
             const { stdout: mergeBase } = await execAsync(
-              `git merge-base HEAD ${branch}`,
+              `git merge-base HEAD ${props.branch}`,
               { encoding: "utf-8" },
             );
             const base = mergeBase.trim();
 
             const { stdout: patchData } = await execAsync(
-              `git diff ${base} ${branch} -- ${value}`,
+              `git diff ${base} ${props.branch} -- ${value}`,
               { encoding: "utf-8" },
             );
 
@@ -594,10 +575,8 @@ cli
               });
 
               if (result2.error) {
-                usePickStore.setState({
-                  message: `Failed to apply ${value}: ${result2.error}`,
-                  messageType: "error",
-                });
+                setMessage(`Failed to apply ${value}: ${result2.error}`);
+                setMessageType("error");
                 fs.unlinkSync(patchFile);
                 return;
               }
@@ -612,29 +591,35 @@ cli
 
             const hasConflict = conflictCheck.trim().length > 0;
 
-            usePickStore.setState((state) => ({
-              selectedFiles: new Set([...state.selectedFiles, value]),
-              appliedFiles: new Map([...state.appliedFiles, [value, true]]),
-              message: hasConflict ? `Applied ${value} with conflicts` : `Applied ${value}`,
-              messageType: hasConflict ? "error" : "",
-            }));
+            setSelectedFiles((prev) => {
+              const next = new Set(prev);
+              next.add(value);
+              return next;
+            });
+            setAppliedFiles((prev) => {
+              const next = new Map(prev);
+              next.set(value, true);
+              return next;
+            });
+            setMessage(hasConflict ? `Applied ${value} with conflicts` : `Applied ${value}`);
+            setMessageType(hasConflict ? "error" : "");
           }
         };
 
         return (
           <box style={{ padding: 1, flexDirection: "column", backgroundColor: BACKGROUND_COLOR }}>
             <Dropdown
-              tooltip={`Pick files from "${branch}"`}
+              tooltip={`Pick files from "${props.branch}"`}
               onChange={handleChange}
-              selectedValues={Array.from(selectedFiles)}
+              selectedValues={Array.from(selectedFiles())}
               placeholder="Search files..."
-              options={files.map((file) => ({
+              options={props.files.map((file) => ({
                 value: file,
                 title: "/" + file,
                 keywords: file.split("/"),
               }))}
             />
-            {message && (
+            <Show when={message()}>
               <box
                 style={{
                   paddingLeft: 2,
@@ -647,17 +632,17 @@ cli
               >
                 <text
                   fg={
-                    messageType === "error"
+                    messageType() === "error"
                       ? "#ff6b6b"
-                      : messageType === "success"
+                      : messageType() === "success"
                         ? "#51cf66"
                         : "#ffffff"
                   }
                 >
-                  {message}
+                  {message()}
                 </text>
               </box>
-            )}
+            </Show>
           </box>
         );
       }
@@ -911,46 +896,49 @@ cli
     const useSplitView = cols >= 150;
 
     // Static component - no hooks that cause re-renders
-    function WebApp() {
+    function WebApp(): JSX.Element {
       return (
         <box style={{ flexDirection: "column", height: "100%", padding: 1, backgroundColor: BACKGROUND_COLOR }}>
-          {sortedFiles.map((file, idx) => {
-            const fileName = getFileName(file);
-            let additions = 0;
-            let deletions = 0;
-            file.hunks.forEach((hunk: any) => {
-              hunk.lines.forEach((line: string) => {
-                if (line.startsWith("+")) additions++;
-                if (line.startsWith("-")) deletions++;
+          <For each={sortedFiles}>
+            {(file) => {
+              const fileName = getFileName(file);
+              let additions = 0;
+              let deletions = 0;
+              file.hunks.forEach((hunk: any) => {
+                hunk.lines.forEach((line: string) => {
+                  if (line.startsWith("+")) additions++;
+                  if (line.startsWith("-")) deletions++;
+                });
               });
-            });
 
-            return (
-              <box key={idx} style={{ flexDirection: "column", marginBottom: 2 }}>
-                <box style={{ paddingBottom: 1, paddingLeft: 1, paddingRight: 1, flexShrink: 0, flexDirection: "row", alignItems: "center" }}>
-                  <text>{fileName.trim()}</text>
-                  <text fg="#00ff00"> +{additions}</text>
-                  <text fg="#ff0000">-{deletions}</text>
+              return (
+                <box style={{ flexDirection: "column", marginBottom: 2 }}>
+                  <box style={{ paddingBottom: 1, paddingLeft: 1, paddingRight: 1, flexShrink: 0, flexDirection: "row", alignItems: "center" }}>
+                    <text>{fileName.trim()}</text>
+                    <text fg="#00ff00"> +{additions}</text>
+                    <text fg="#ff0000">-{deletions}</text>
+                  </box>
+                  <FileEditPreview
+                    hunks={file.hunks}
+                    paddingLeft={0}
+                    splitView={useSplitView}
+                    filePath={fileName}
+                  />
                 </box>
-                <FileEditPreview
-                  hunks={file.hunks}
-                  paddingLeft={0}
-                  splitView={useSplitView}
-                  filePath={fileName}
-                />
-              </box>
-            );
-          })}
+              );
+            }}
+          </For>
         </box>
       );
     }
 
     createRoot(renderer).render(
-      React.createElement(ErrorBoundary, null, React.createElement(WebApp))
+      <ErrorBoundary>
+        <WebApp />
+      </ErrorBoundary>
     );
   });
 
 cli.help();
 cli.version("1.0.0");
-// comment
 cli.parse();

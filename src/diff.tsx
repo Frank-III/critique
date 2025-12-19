@@ -2,7 +2,8 @@ import { RGBA, type MouseEvent } from "@opentui/core";
 import { execSync } from "child_process";
 import { diffWords } from "diff";
 
-import * as React from "react";
+import { createSignal, onMount, For, Show, type JSX } from "solid-js";
+import { ErrorBoundary as SolidErrorBoundary } from "solid-js/web";
 
 import { type StructuredPatchHunk as Hunk } from "diff";
 import {
@@ -113,83 +114,61 @@ function detectLanguage(filePath: string): BundledLanguage {
   }
 }
 
-function renderHighlightedTokens(tokens: ThemedToken[]) {
-  return tokens.map((token, tokenIdx) => {
-    const color = token.color;
-    const fg = color ? RGBA.fromHex(color) : undefined;
-
-    return (
-      <span key={tokenIdx} fg={fg}>
-        {token.content}
-      </span>
-    );
-  });
+function renderHighlightedTokens(tokens: ThemedToken[]): JSX.Element {
+  return (
+    <>
+      <For each={tokens}>
+        {(token) => {
+          const color = token.color;
+          const fg = color ? RGBA.fromHex(color) : undefined;
+          return <span fg={fg}>{token.content}</span>;
+        }}
+      </For>
+    </>
+  );
 }
 
-// Custom error boundary class
-class ErrorBoundary extends React.Component<
-  { children: React.ReactNode },
-  { hasError: boolean; error: Error | null }
-> {
-  constructor(props: { children: React.ReactNode }) {
-    super(props);
-    this.state = { hasError: false, error: null };
+// Error boundary wrapper for SolidJS
+function ErrorBoundary(props: { children: JSX.Element }): JSX.Element {
+  return (
+    <SolidErrorBoundary
+      fallback={(err: Error) => {
+        console.error("Error caught by boundary:", err);
 
-    // Bind methods
-    this.componentDidCatch = this.componentDidCatch.bind(this);
-  }
+        // Copy stack trace to clipboard
+        const stackTrace = `${err.message}\n\nStack trace:\n${err.stack}`;
+        try {
+          execSync("pbcopy", { input: stackTrace });
+        } catch (copyError) {
+          console.error("Failed to copy to clipboard:", copyError);
+        }
 
-  static getDerivedStateFromError(error: Error): {
-    hasError: boolean;
-    error: Error;
-  } {
-    return { hasError: true, error };
-  }
-
-  override componentDidCatch(error: Error, errorInfo: React.ErrorInfo): void {
-    console.error("Error caught by boundary:", error);
-    console.error("Component stack:", errorInfo.componentStack);
-
-    // Copy stack trace to clipboard
-    const stackTrace = `${error.message}\n\nStack trace:\n${error.stack}\n\nComponent stack:\n${errorInfo.componentStack}`;
-    const { execSync } = require("child_process");
-    try {
-      execSync("pbcopy", { input: stackTrace });
-    } catch (copyError) {
-      console.error("Failed to copy to clipboard:", copyError);
-    }
-  }
-
-  override render(): any {
-    if (this.state.hasError && this.state.error) {
-      return (
-        <box style={{ flexDirection: "column", padding: 2 }}>
-          <text fg="red">
-            <strong>Error occurred:</strong>
-          </text>
-          <text>{this.state.error.message}</text>
-          <text fg="brightBlack">Stack trace (copied to clipboard):</text>
-          <text fg="white">{this.state.error.stack}</text>
-        </box>
-      );
-    }
-
-    return this.props.children;
-  }
+        return (
+          <box style={{ flexDirection: "column", padding: 2 }}>
+            <text fg="red">
+              <strong>Error occurred:</strong>
+            </text>
+            <text>{err.message}</text>
+            <text fg="brightBlack">Stack trace (copied to clipboard):</text>
+            <text fg="white">{err.stack}</text>
+          </box>
+        );
+      }}
+    >
+      {props.children}
+    </SolidErrorBoundary>
+  );
 }
 
-export const FileEditPreviewTitle = ({
-  filePath,
-  hunks,
-}: {
+export const FileEditPreviewTitle = (props: {
   filePath: string;
   hunks: Hunk[];
-}) => {
-  const numAdditions = hunks.reduce(
+}): JSX.Element => {
+  const numAdditions = props.hunks.reduce(
     (count, hunk) => count + hunk.lines.filter((_) => _.startsWith("+")).length,
     0,
   );
-  const numRemovals = hunks.reduce(
+  const numRemovals = props.hunks.reduce(
     (count, hunk) => count + hunk.lines.filter((_) => _.startsWith("-")).length,
     0,
   );
@@ -199,45 +178,40 @@ export const FileEditPreviewTitle = ({
 
   return (
     <text>
-      {isNewFile ? "Created" : isDeleted ? "Deleted" : "Updated"} <strong>{filePath}</strong>
+      {isNewFile ? "Created" : isDeleted ? "Deleted" : "Updated"} <strong>{props.filePath}</strong>
       {numAdditions > 0 || numRemovals > 0 ? " with " : ""}
-      {numAdditions > 0 ? (
-        <>
-          <strong>{numAdditions}</strong>{" "}
-          {numAdditions > 1 ? "additions" : "addition"}
-        </>
-      ) : null}
-      {numAdditions > 0 && numRemovals > 0 ? " and " : null}
-      {numRemovals > 0 ? (
-        <>
-          <strong>{numRemovals}</strong>{" "}
-          {numRemovals > 1 ? "removals" : "removal"}
-        </>
-      ) : null}
+      <Show when={numAdditions > 0}>
+        <strong>{numAdditions}</strong>{" "}
+        {numAdditions > 1 ? "additions" : "addition"}
+      </Show>
+      <Show when={numAdditions > 0 && numRemovals > 0}> and </Show>
+      <Show when={numRemovals > 0}>
+        <strong>{numRemovals}</strong>{" "}
+        {numRemovals > 1 ? "removals" : "removal"}
+      </Show>
     </text>
   );
 };
 
-export const FileEditPreview = ({
-  hunks,
-  paddingLeft = 0,
-  splitView = true,
-  filePath = "",
-}: {
+export const FileEditPreview = (props: {
   hunks: Hunk[];
   paddingLeft?: number;
   splitView?: boolean;
   filePath?: string;
-}) => {
-  React.useEffect(() => {
+}): JSX.Element => {
+  const paddingLeft = props.paddingLeft ?? 0;
+  const splitView = props.splitView ?? true;
+  const filePath = props.filePath ?? "";
+
+  onMount(() => {
     console.log(
       `Highlighter initialized in ${highlighterDuration.toFixed(2)}ms`,
     );
-  }, []);
+  });
 
-  const allLines = hunks.flatMap((h) => h.lines);
-  let oldLineNum = hunks[0]?.oldStart || 1;
-  let newLineNum = hunks[0]?.newStart || 1;
+  const allLines = props.hunks.flatMap((h) => h.lines);
+  let oldLineNum = props.hunks[0]?.oldStart || 1;
+  let newLineNum = props.hunks[0]?.newStart || 1;
 
   const maxOldLine = allLines.reduce((max, line) => {
     if (line.startsWith("-")) {
@@ -252,8 +226,8 @@ export const FileEditPreview = ({
     }
   }, 0);
 
-  oldLineNum = hunks[0]?.oldStart || 1;
-  newLineNum = hunks[0]?.newStart || 1;
+  oldLineNum = props.hunks[0]?.oldStart || 1;
+  newLineNum = props.hunks[0]?.newStart || 1;
   const maxNewLine = allLines.reduce((max, line) => {
     if (line.startsWith("-")) {
       oldLineNum++;
@@ -272,30 +246,28 @@ export const FileEditPreview = ({
 
   return (
     <box style={{ flexDirection: "column" }}>
-      {hunks.flatMap((patch, i) => {
-        const elements = [
-          <box
-            style={{ flexDirection: "column", paddingLeft }}
-            key={patch.newStart}
-          >
-            <StructuredDiff
-              patch={patch}
-              splitView={splitView}
-              leftMaxWidth={leftMaxWidth}
-              rightMaxWidth={rightMaxWidth}
-              filePath={filePath}
-            />
-          </box>,
-        ];
-        if (i < hunks.length - 1) {
-          elements.push(
-            <box style={{ paddingLeft }} key={`ellipsis-${i}`}>
-              <text fg="brightBlack">{" ".repeat(leftMaxWidth + 2)}…</text>
-            </box>,
-          );
-        }
-        return elements;
-      })}
+      <For each={props.hunks}>
+        {(patch, i) => (
+          <>
+            <box
+              style={{ flexDirection: "column", paddingLeft }}
+            >
+              <StructuredDiff
+                patch={patch}
+                splitView={splitView}
+                leftMaxWidth={leftMaxWidth}
+                rightMaxWidth={rightMaxWidth}
+                filePath={filePath}
+              />
+            </box>
+            <Show when={i() < props.hunks.length - 1}>
+              <box style={{ paddingLeft }}>
+                <text fg="brightBlack">{" ".repeat(leftMaxWidth + 2)}…</text>
+              </box>
+            </Show>
+          </>
+        )}
+      </For>
     </box>
   );
 };
@@ -337,19 +309,18 @@ function levenshteinDistance(str1: string, str2: string): number {
   return matrix[len1]![len2]!;
 }
 
-const StructuredDiff = ({
-  patch,
-  splitView = true,
-  leftMaxWidth = 0,
-  rightMaxWidth = 0,
-  filePath = "",
-}: {
+const StructuredDiff = (props: {
   patch: Hunk;
   splitView?: boolean;
   leftMaxWidth?: number;
   rightMaxWidth?: number;
   filePath?: string;
-}) => {
+}): JSX.Element => {
+  const splitView = props.splitView ?? true;
+  const leftMaxWidth = props.leftMaxWidth ?? 0;
+  const rightMaxWidth = props.rightMaxWidth ?? 0;
+  const filePath = props.filePath ?? "";
+
   const formatDiff = (
     lines: string[],
     startingLineNumber: number,
@@ -459,7 +430,7 @@ const StructuredDiff = ({
     let oldLineNumber = startingLineNumber;
     let newLineNumber = startingLineNumber;
     const result: Array<{
-      code: any;
+      code: JSX.Element;
       type: string;
       oldLineNumber: number;
       newLineNumber: number;
@@ -508,19 +479,21 @@ const StructuredDiff = ({
 
         const removedContent = (
           <text>
-            {wordDiff.map((part, idx) => {
-              if (part.removed) {
-                return (
-                  <span key={idx} bg={RGBA.fromInts(255, 50, 50, 100)}>
-                    {part.value}
-                  </span>
-                );
-              }
-              if (!part.added) {
-                return <span key={idx}>{part.value}</span>;
-              }
-              return null;
-            })}
+            <For each={wordDiff}>
+              {(part) => {
+                if (part.removed) {
+                  return (
+                    <span bg={RGBA.fromInts(255, 50, 50, 100)}>
+                      {part.value}
+                    </span>
+                  );
+                }
+                if (!part.added) {
+                  return <span>{part.value}</span>;
+                }
+                return null;
+              }}
+            </For>
           </text>
         );
 
@@ -566,19 +539,21 @@ const StructuredDiff = ({
 
         const addedContent = (
           <text>
-            {wordDiff.map((part, idx) => {
-              if (part.added) {
-                return (
-                  <span key={idx} bg={RGBA.fromInts(0, 200, 0, 100)}>
-                    {part.value}
-                  </span>
-                );
-              }
-              if (!part.removed) {
-                return <span key={idx}>{part.value}</span>;
-              }
-              return null;
-            })}
+            <For each={wordDiff}>
+              {(part) => {
+                if (part.added) {
+                  return (
+                    <span bg={RGBA.fromInts(0, 200, 0, 100)}>
+                      {part.value}
+                    </span>
+                  );
+                }
+                if (!part.removed) {
+                  return <span>{part.value}</span>;
+                }
+                return null;
+              }}
+            </For>
           </text>
         );
 
@@ -637,7 +612,7 @@ const StructuredDiff = ({
     );
   };
 
-  const diff = formatDiff(patch.lines, patch.oldStart, splitView);
+  const diff = formatDiff(props.patch.lines, props.patch.oldStart, splitView);
 
   const maxWidth = Math.max(leftMaxWidth, rightMaxWidth);
 
@@ -651,54 +626,56 @@ const StructuredDiff = ({
     }));
     return (
       <>
-        {paddedDiff.map(({ lineNumber, code, type, key, newLineNumber }) => (
-          <box key={key} style={{ flexDirection: "row" }}>
-            <box
-              style={{
-                flexShrink: 0,
-                alignSelf: "stretch",
-                backgroundColor:
-                  type === "add"
-                    ? ADDED_LINE_NUMBER_BG
-                    : type === "remove"
-                      ? REMOVED_LINE_NUMBER_BG
-                      : LINE_NUMBER_BG,
-              }}
-              onMouse={(event: MouseEvent) => {
-                if (event.type === "down") {
-                  openInEditor(filePath, parseInt(newLineNumber));
-                }
-              }}
-            >
-              <text
-                selectable={false}
-                fg={
-                  type === "add" || type === "remove"
-                    ? LINE_NUMBER_FG_BRIGHT
-                    : LINE_NUMBER_FG_DIM
-                }
-                style={{ width: maxWidth + 2 }}
+        <For each={paddedDiff}>
+          {(item) => (
+            <box style={{ flexDirection: "row" }}>
+              <box
+                style={{
+                  flexShrink: 0,
+                  alignSelf: "stretch",
+                  backgroundColor:
+                    item.type === "add"
+                      ? ADDED_LINE_NUMBER_BG
+                      : item.type === "remove"
+                        ? REMOVED_LINE_NUMBER_BG
+                        : LINE_NUMBER_BG,
+                }}
+                onMouse={(event: MouseEvent) => {
+                  if (event.type === "down") {
+                    openInEditor(filePath, parseInt(item.newLineNumber));
+                  }
+                }}
               >
-                {" "}
-                {lineNumber}{" "}
-              </text>
+                <text
+                  selectable={false}
+                  fg={
+                    item.type === "add" || item.type === "remove"
+                      ? LINE_NUMBER_FG_BRIGHT
+                      : LINE_NUMBER_FG_DIM
+                  }
+                  style={{ width: maxWidth + 2 }}
+                >
+                  {" "}
+                  {item.lineNumber}{" "}
+                </text>
+              </box>
+              <box
+                style={{
+                  flexGrow: 1,
+                  paddingLeft: 1,
+                  backgroundColor:
+                    item.type === "add"
+                      ? ADDED_BG_LIGHT
+                      : item.type === "remove"
+                        ? REMOVED_BG_LIGHT
+                        : UNCHANGED_CODE_BG,
+                }}
+              >
+                {item.code}
+              </box>
             </box>
-            <box
-              style={{
-                flexGrow: 1,
-                paddingLeft: 1,
-                backgroundColor:
-                  type === "add"
-                    ? ADDED_BG_LIGHT
-                    : type === "remove"
-                      ? REMOVED_BG_LIGHT
-                      : UNCHANGED_CODE_BG,
-              }}
-            >
-              {code}
-            </box>
-          </box>
-        ))}
+          )}
+        </For>
       </>
     );
   }
@@ -785,103 +762,105 @@ const StructuredDiff = ({
 
   return (
     <>
-      {splitLines.map(({ left: leftLine, right: rightLine }) => (
-        <box key={leftLine.key} style={{ flexDirection: "row" }}>
-          {/* Left side (removals) */}
-          <box style={{ flexDirection: "row", width: "50%" }}>
-            <box
-              style={{
-                flexShrink: 0,
-                minWidth: leftMaxWidth + 2,
-                alignSelf: "stretch",
-                backgroundColor:
-                  leftLine.type === "remove"
-                    ? REMOVED_LINE_NUMBER_BG
-                    : LINE_NUMBER_BG,
-              }}
-              onMouse={(event: MouseEvent) => {
-                if (
-                  event.type === "down" &&
-                  leftLine.oldLineNumber &&
-                  leftLine.oldLineNumber !== "0"
-                ) {
-                  openInEditor(filePath, parseInt(leftLine.oldLineNumber));
-                }
-              }}
-            >
-              <text
-                selectable={false}
-                fg={
-                  leftLine.type === "remove"
-                    ? LINE_NUMBER_FG_BRIGHT
-                    : LINE_NUMBER_FG_DIM
-                }
+      <For each={splitLines}>
+        {({ left: leftLine, right: rightLine }) => (
+          <box style={{ flexDirection: "row" }}>
+            {/* Left side (removals) */}
+            <box style={{ flexDirection: "row", width: "50%" }}>
+              <box
+                style={{
+                  flexShrink: 0,
+                  minWidth: leftMaxWidth + 2,
+                  alignSelf: "stretch",
+                  backgroundColor:
+                    leftLine.type === "remove"
+                      ? REMOVED_LINE_NUMBER_BG
+                      : LINE_NUMBER_BG,
+                }}
+                onMouse={(event: MouseEvent) => {
+                  if (
+                    event.type === "down" &&
+                    leftLine.oldLineNumber &&
+                    leftLine.oldLineNumber !== "0"
+                  ) {
+                    openInEditor(filePath, parseInt(leftLine.oldLineNumber));
+                  }
+                }}
               >
-                {" "}
-                {leftLine.lineNumber}{" "}
-              </text>
+                <text
+                  selectable={false}
+                  fg={
+                    leftLine.type === "remove"
+                      ? LINE_NUMBER_FG_BRIGHT
+                      : LINE_NUMBER_FG_DIM
+                  }
+                >
+                  {" "}
+                  {leftLine.lineNumber}{" "}
+                </text>
+              </box>
+              <box
+                style={{
+                  flexGrow: 1,
+                  paddingLeft: 1,
+                  minWidth: 0,
+                  backgroundColor:
+                    leftLine.type === "remove"
+                      ? REMOVED_BG_LIGHT
+                      : UNCHANGED_CODE_BG,
+                }}
+              >
+                {leftLine.code}
+              </box>
             </box>
-            <box
-              style={{
-                flexGrow: 1,
-                paddingLeft: 1,
-                minWidth: 0,
-                backgroundColor:
-                  leftLine.type === "remove"
-                    ? REMOVED_BG_LIGHT
-                    : UNCHANGED_CODE_BG,
-              }}
-            >
-              {leftLine.code}
-            </box>
-          </box>
 
-          {/* Right side (additions) */}
-          <box style={{ flexDirection: "row", width: "50%" }}>
-            <box
-              style={{
-                flexShrink: 0,
-                minWidth: leftMaxWidth + 2,
-                alignSelf: "stretch",
-                backgroundColor:
-                  rightLine.type === "add"
-                    ? ADDED_LINE_NUMBER_BG
-                    : LINE_NUMBER_BG,
-              }}
-              onMouse={(event: MouseEvent) => {
-                if (event.type === "down") {
-                  openInEditor(filePath, parseInt(rightLine.newLineNumber));
-                }
-              }}
-            >
-              <text
-                selectable={false}
-                fg={
-                  rightLine.type === "add"
-                    ? LINE_NUMBER_FG_BRIGHT
-                    : LINE_NUMBER_FG_DIM
-                }
+            {/* Right side (additions) */}
+            <box style={{ flexDirection: "row", width: "50%" }}>
+              <box
+                style={{
+                  flexShrink: 0,
+                  minWidth: leftMaxWidth + 2,
+                  alignSelf: "stretch",
+                  backgroundColor:
+                    rightLine.type === "add"
+                      ? ADDED_LINE_NUMBER_BG
+                      : LINE_NUMBER_BG,
+                }}
+                onMouse={(event: MouseEvent) => {
+                  if (event.type === "down") {
+                    openInEditor(filePath, parseInt(rightLine.newLineNumber));
+                  }
+                }}
               >
-                {" "}
-                {rightLine.lineNumber}{" "}
-              </text>
-            </box>
-            <box
-              style={{
-                flexGrow: 1,
-                minWidth: 0,
-                paddingLeft: 1,
-                backgroundColor:
-                  rightLine.type === "add"
-                    ? ADDED_BG_LIGHT
-                    : UNCHANGED_CODE_BG,
-              }}
-            >
-              {rightLine.code}
+                <text
+                  selectable={false}
+                  fg={
+                    rightLine.type === "add"
+                      ? LINE_NUMBER_FG_BRIGHT
+                      : LINE_NUMBER_FG_DIM
+                  }
+                >
+                  {" "}
+                  {rightLine.lineNumber}{" "}
+                </text>
+              </box>
+              <box
+                style={{
+                  flexGrow: 1,
+                  minWidth: 0,
+                  paddingLeft: 1,
+                  backgroundColor:
+                    rightLine.type === "add"
+                      ? ADDED_BG_LIGHT
+                      : UNCHANGED_CODE_BG,
+                }}
+              >
+                {rightLine.code}
+              </box>
             </box>
           </box>
-        </box>
-      ))}
+        )}
+      </For>
     </>
   );
 };
