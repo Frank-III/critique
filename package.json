@@ -22,6 +22,7 @@
     "vercel": "^41.0.0"
   },
   "dependencies": {
+    "e2b": "^1.0.7",
     "@xmorse/bun-pty": "0.4.0",
     "@opentui/core": "^0.1.61",
     "@opentui/solid": "^0.1.61",

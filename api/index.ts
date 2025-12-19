@@ -1,6 +1,7 @@
 import { Hono } from "hono"
 import { cors } from "hono/cors"
 import { handle } from "hono/vercel"
+import { Sandbox } from "e2b"
 
 // =============================================================================
 // Types
@@ -29,13 +30,6 @@ interface GitHubCompareInfo {
 }
 
 type GitHubInfo = GitHubPRInfo | GitHubCommitInfo | GitHubCompareInfo
-
-interface ParsedFile {
-  fileName: string
-  diff: string
-  additions: number
-  deletions: number
-}
 
 // =============================================================================
 // GitHub URL Parsing
@@ -127,248 +121,47 @@ async function fetchGitHubDiff(info: GitHubInfo, token?: string): Promise<string
 }
 
 // =============================================================================
-// Diff Parsing
+// E2B Sandbox
 // =============================================================================
 
-function parseGitDiff(diffText: string): ParsedFile[] {
-  const files: ParsedFile[] = []
-  const filePattern = /^diff --git a\/.+ b\/(.+)$/gm
-  const parts = diffText.split(/(?=^diff --git)/m).filter(Boolean)
-
-  for (const part of parts) {
-    const fileMatch = part.match(/^diff --git a\/.+ b\/(.+)$/m)
-    if (!fileMatch) continue
-
-    const fileName = fileMatch[1] || "unknown"
-    const lines = part.split("\n")
-
-    let additions = 0
-    let deletions = 0
-
-    for (const line of lines) {
-      if (line.startsWith("+") && !line.startsWith("+++")) additions++
-      if (line.startsWith("-") && !line.startsWith("---")) deletions++
-    }
-
-    files.push({
-      fileName,
-      diff: part,
-      additions,
-      deletions,
-    })
+async function renderDiffWithE2B(
+  diff: string,
+  cols: number = 240,
+  rows: number = 2000
+): Promise<string> {
+  const apiKey = process.env.E2B_API_KEY
+  if (!apiKey) {
+    throw new Error("E2B_API_KEY not configured")
   }
 
-  return files
-}
+  // Create sandbox with bun installed
+  const sandbox = await Sandbox.create({
+    apiKey,
+    timeoutMs: 60000,
+  })
 
-function escapeHtml(text: string): string {
-  return text
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#039;")
-}
+  try {
+    // Install bun and critique
+    await sandbox.commands.run("curl -fsSL https://bun.sh/install | bash", { timeoutMs: 30000 })
+    await sandbox.commands.run("export PATH=$HOME/.bun/bin:$PATH && bun add -g critique", { timeoutMs: 60000 })
 
-function detectLanguage(fileName: string): string {
-  const ext = fileName.split(".").pop()?.toLowerCase() || ""
-  const langMap: Record<string, string> = {
-    ts: "typescript", tsx: "tsx", js: "javascript", jsx: "jsx",
-    py: "python", rb: "ruby", go: "go", rs: "rust",
-    java: "java", kt: "kotlin", swift: "swift",
-    css: "css", scss: "scss", html: "html",
-    json: "json", yaml: "yaml", yml: "yaml", toml: "toml",
-    md: "markdown", sh: "bash", bash: "bash",
-    sql: "sql", graphql: "graphql",
+    // Write diff to file
+    await sandbox.files.write("/tmp/diff.patch", diff)
+
+    // Run critique with --stdout
+    const result = await sandbox.commands.run(
+      `export PATH=$HOME/.bun/bin:$PATH && critique web --patch /tmp/diff.patch --stdout --cols ${cols} --rows ${rows}`,
+      { timeoutMs: 60000 }
+    )
+
+    if (result.exitCode !== 0) {
+      throw new Error(`critique failed: ${result.stderr}`)
+    }
+
+    return result.stdout
+  } finally {
+    await sandbox.kill()
   }
-  return langMap[ext] || "text"
-}
-
-// =============================================================================
-// HTML Diff Renderer
-// =============================================================================
-
-function renderDiffToHtml(diffText: string, info: GitHubInfo): string {
-  const files = parseGitDiff(diffText)
-
-  const title = info.type === "pull"
-    ? `PR #${info.number} - ${info.owner}/${info.repo}`
-    : info.type === "commit"
-    ? `Commit ${info.sha.slice(0, 7)} - ${info.owner}/${info.repo}`
-    : `Compare ${info.base}...${info.head} - ${info.owner}/${info.repo}`
-
-  const totalAdditions = files.reduce((sum, f) => sum + f.additions, 0)
-  const totalDeletions = files.reduce((sum, f) => sum + f.deletions, 0)
-
-  let filesHtml = ""
-
-  for (const file of files) {
-    const lines = file.diff.split("\n")
-    let lineHtml = ""
-    let oldLineNum = 0
-    let newLineNum = 0
-    let inHunk = false
-
-    for (const line of lines) {
-      // Parse hunk header
-      const hunkMatch = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/)
-      if (hunkMatch) {
-        oldLineNum = parseInt(hunkMatch[1] || "0", 10)
-        newLineNum = parseInt(hunkMatch[2] || "0", 10)
-        inHunk = true
-        lineHtml += `<div class="line hunk-header"><span class="line-num"></span><span class="line-num"></span><span class="line-content">${escapeHtml(line)}</span></div>`
-        continue
-      }
-
-      if (!inHunk) continue
-      if (line.startsWith("diff --git") || line.startsWith("index ") || line.startsWith("---") || line.startsWith("+++")) continue
-
-      const escaped = escapeHtml(line.slice(1) || " ")
-
-      if (line.startsWith("+")) {
-        lineHtml += `<div class="line added"><span class="line-num"></span><span class="line-num">${newLineNum}</span><span class="line-content">+${escaped}</span></div>`
-        newLineNum++
-      } else if (line.startsWith("-")) {
-        lineHtml += `<div class="line removed"><span class="line-num">${oldLineNum}</span><span class="line-num"></span><span class="line-content">-${escaped}</span></div>`
-        oldLineNum++
-      } else if (line.startsWith(" ") || line === "") {
-        lineHtml += `<div class="line context"><span class="line-num">${oldLineNum}</span><span class="line-num">${newLineNum}</span><span class="line-content"> ${escaped}</span></div>`
-        oldLineNum++
-        newLineNum++
-      }
-    }
-
-    filesHtml += `
-      <div class="file">
-        <div class="file-header">
-          <span class="file-name">${escapeHtml(file.fileName)}</span>
-          <span class="file-stats">
-            <span class="additions">+${file.additions}</span>
-            <span class="deletions">-${file.deletions}</span>
-          </span>
-        </div>
-        <div class="file-diff">${lineHtml}</div>
-      </div>
-    `
-  }
-
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>${escapeHtml(title)}</title>
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
-      font-size: 13px;
-      line-height: 1.5;
-      background: #0d1117;
-      color: #c9d1d9;
-      padding: 20px;
-    }
-    .header {
-      margin-bottom: 20px;
-      padding-bottom: 15px;
-      border-bottom: 1px solid #30363d;
-    }
-    .header h1 {
-      font-size: 20px;
-      font-weight: 600;
-      margin-bottom: 8px;
-    }
-    .header .stats {
-      font-size: 14px;
-      color: #8b949e;
-    }
-    .header .stats .additions { color: #3fb950; }
-    .header .stats .deletions { color: #f85149; }
-    .file {
-      margin-bottom: 20px;
-      border: 1px solid #30363d;
-      border-radius: 6px;
-      overflow: hidden;
-    }
-    .file-header {
-      background: #161b22;
-      padding: 10px 16px;
-      border-bottom: 1px solid #30363d;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-    }
-    .file-name {
-      font-weight: 600;
-      color: #c9d1d9;
-    }
-    .file-stats .additions { color: #3fb950; margin-right: 8px; }
-    .file-stats .deletions { color: #f85149; }
-    .file-diff {
-      overflow-x: auto;
-    }
-    .line {
-      display: flex;
-      min-height: 20px;
-      white-space: pre;
-    }
-    .line-num {
-      width: 50px;
-      min-width: 50px;
-      padding: 0 10px;
-      text-align: right;
-      color: #484f58;
-      background: #161b22;
-      user-select: none;
-      border-right: 1px solid #30363d;
-    }
-    .line-content {
-      flex: 1;
-      padding: 0 10px;
-      overflow-x: auto;
-    }
-    .line.added {
-      background: rgba(46, 160, 67, 0.15);
-    }
-    .line.added .line-content {
-      color: #3fb950;
-    }
-    .line.added .line-num {
-      background: rgba(46, 160, 67, 0.2);
-    }
-    .line.removed {
-      background: rgba(248, 81, 73, 0.15);
-    }
-    .line.removed .line-content {
-      color: #f85149;
-    }
-    .line.removed .line-num {
-      background: rgba(248, 81, 73, 0.2);
-    }
-    .line.hunk-header {
-      background: rgba(56, 139, 253, 0.1);
-      color: #58a6ff;
-    }
-    .line.hunk-header .line-num {
-      background: rgba(56, 139, 253, 0.15);
-    }
-    .line.context {
-      background: #0d1117;
-    }
-  </style>
-</head>
-<body>
-  <div class="header">
-    <h1>${escapeHtml(title)}</h1>
-    <div class="stats">
-      ${files.length} files changed,
-      <span class="additions">+${totalAdditions} additions</span>,
-      <span class="deletions">-${totalDeletions} deletions</span>
-    </div>
-  </div>
-  ${filesHtml}
-</body>
-</html>`
 }
 
 // =============================================================================
@@ -410,7 +203,7 @@ const app = new Hono()
 app.use("*", cors())
 
 app.get("/health", (c) => {
-  return c.json({ status: "ok", runtime: "bun" })
+  return c.json({ status: "ok", runtime: "bun", renderer: "e2b" })
 })
 
 app.get("/", (c) => {
@@ -469,7 +262,7 @@ async function handleGitHubDiff(c: any, info: GitHubInfo) {
       return c.text("No diff content", 404)
     }
 
-    const html = renderDiffToHtml(diff, info)
+    const html = await renderDiffWithE2B(diff)
 
     setCachedHtml(cacheKey, html)
 
