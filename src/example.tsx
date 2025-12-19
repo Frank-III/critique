@@ -1,4 +1,4 @@
-import { structuredPatch } from "diff";
+import { createPatch } from "diff";
 import {
   render,
   useKeyboard,
@@ -6,13 +6,31 @@ import {
   useRenderer,
   useTerminalDimensions,
 } from "@opentui/solid";
-import { MacOSScrollAccel } from "@opentui/core";
+import { MacOSScrollAccel, RGBA } from "@opentui/core";
 import { createSignal, type JSX } from "solid-js";
-import {
-  ErrorBoundary,
-  FileEditPreviewTitle,
-  FileEditPreview,
-} from "./diff.tsx";
+import { ErrorBoundary as SolidErrorBoundary } from "solid-js/web";
+
+// Colors matching cli.tsx
+const ADDED_BG = RGBA.fromInts(0, 60, 0, 255);
+const REMOVED_BG = RGBA.fromInts(60, 0, 0, 255);
+const ADDED_LINE_NUMBER_BG = RGBA.fromInts(0, 50, 0, 255);
+const REMOVED_LINE_NUMBER_BG = RGBA.fromInts(60, 0, 0, 255);
+const LINE_NUMBER_BG = RGBA.fromInts(30, 30, 30, 255);
+const LINE_NUMBER_FG = RGBA.fromInts(100, 100, 100, 255);
+
+function ErrorBoundary(props: { children: JSX.Element }): JSX.Element {
+  return (
+    <SolidErrorBoundary
+      fallback={(err: Error) => (
+        <box style={{ flexDirection: "column", padding: 2 }}>
+          <text fg="red">Error: {err.message}</text>
+        </box>
+      )}
+    >
+      {props.children}
+    </SolidErrorBoundary>
+  );
+}
 
 function App(): JSX.Element {
   const renderer = useRenderer();
@@ -24,7 +42,7 @@ function App(): JSX.Element {
     setWidth(newWidth);
   });
 
-  const useSplitView = () => width() >= 100;
+  const useSplitView = () => (width() >= 100 ? "split" : "unified");
 
   useKeyboard((key) => {
     if (key.name === "z" && key.ctrl) {
@@ -34,8 +52,10 @@ function App(): JSX.Element {
 
   return (
     <box style={{ flexDirection: "column", height: "100%", padding: 1 }}>
-      <FileEditPreviewTitle filePath={filePath} hunks={hunks} />
-      <box paddingTop={3} />
+      <text>
+        {filePath} <text fg="#00ff00">+{additions}</text> <text fg="#ff0000">-{deletions}</text>
+      </text>
+      <box paddingTop={1} />
       <scrollbox
         scrollAcceleration={scrollAcceleration}
         style={{
@@ -54,14 +74,25 @@ function App(): JSX.Element {
         }}
         focused
       >
-        <FileEditPreview hunks={hunks} paddingLeft={0} filePath={filePath} />
+        <diff
+          diff={diffString}
+          view={useSplitView()}
+          filetype="tsx"
+          showLineNumbers={true}
+          addedBg={ADDED_BG}
+          removedBg={REMOVED_BG}
+          addedLineNumberBg={ADDED_LINE_NUMBER_BG}
+          removedLineNumberBg={REMOVED_LINE_NUMBER_BG}
+          lineNumberBg={LINE_NUMBER_BG}
+          lineNumberFg={LINE_NUMBER_FG}
+        />
       </scrollbox>
     </box>
   );
 }
 
-// Example file content before and after - Extended version for scrolling demo
-export const beforeContent = `import React from 'react'
+// Example file content before and after
+const beforeContent = `import React from 'react'
 import PropTypes from 'prop-types'
 import { cn } from '../utils/cn'
 import { useEffect, useState } from 'react'
@@ -98,7 +129,7 @@ function Button({
 
 export default Button`;
 
-export const afterContent = `import React from 'react'
+const afterContent = `import React from 'react'
 import PropTypes from 'prop-types'
 import { cn } from '../utils/cn'
 import { useEffect, useState, useCallback } from 'react'
@@ -150,15 +181,13 @@ function Button({
 export default Button`;
 
 const filePath = "/src/components/Button.tsx";
-const hunks = structuredPatch(
-  filePath,
-  filePath,
-  beforeContent,
-  afterContent,
-  undefined,
-  undefined,
-  { context: 3, ignoreWhitespace: true, stripTrailingCr: true },
-).hunks;
+
+// Create a git-style diff string
+const diffString = createPatch(filePath, beforeContent, afterContent, "", "", { context: 3 });
+
+// Count additions and deletions
+const additions = (diffString.match(/^\+[^+]/gm) || []).length;
+const deletions = (diffString.match(/^-[^-]/gm) || []).length;
 
 await render(() => (
   <ErrorBoundary>
