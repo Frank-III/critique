@@ -679,36 +679,56 @@ cli
   .command("web [ref]", "Generate web preview of diff")
   .option("--staged", "Show staged changes")
   .option("--commit <ref>", "Show changes from a specific commit")
+  .option("--patch <file>", "Use diff from a patch file instead of git")
   .option("--cols <cols>", "Number of columns for rendering (use ~100 for mobile)", { default: 240 })
   .option("--rows <rows>", "Number of rows for rendering", { default: 2000 })
   .option("--local", "Open local preview instead of uploading")
+  .option("--stdout", "Output HTML to stdout instead of uploading")
   .action(async (ref, options) => {
     const pty = await import("@xmorse/bun-pty");
     const { ansiToHtmlDocument } = await import("./ansi-html.ts");
 
-    const gitCommand = (() => {
-      if (options.staged) return "git diff --cached --no-prefix";
-      if (options.commit) return `git show ${options.commit} --no-prefix`;
-      if (ref) return `git show ${ref} --no-prefix`;
-      return "git add -N . && git diff --no-prefix";
-    })();
-
     const cols = parseInt(options.cols) || 240;
     const rows = parseInt(options.rows) || 2000;
 
-    console.log("Capturing diff output...");
+    let gitDiff: string;
+    let diffFile: string;
+    let shouldCleanupDiffFile = false;
 
-    // Get the git diff first
-    const { stdout: gitDiff } = await execAsync(gitCommand, { encoding: "utf-8" });
+    if (options.patch) {
+      // Read diff from provided patch file
+      if (!fs.existsSync(options.patch)) {
+        console.error(`Patch file not found: ${options.patch}`);
+        process.exit(1);
+      }
+      gitDiff = fs.readFileSync(options.patch, "utf-8");
+      diffFile = options.patch;
+    } else {
+      // Get diff from git
+      const gitCommand = (() => {
+        if (options.staged) return "git diff --cached --no-prefix";
+        if (options.commit) return `git show ${options.commit} --no-prefix`;
+        if (ref) return `git show ${ref} --no-prefix`;
+        return "git add -N . && git diff --no-prefix";
+      })();
+
+      if (!options.stdout) {
+        console.log("Capturing diff output...");
+      }
+
+      const { stdout } = await execAsync(gitCommand, { encoding: "utf-8" });
+      gitDiff = stdout;
+
+      // Write diff to temp file
+      diffFile = join(tmpdir(), `critique-web-diff-${Date.now()}.patch`);
+      fs.writeFileSync(diffFile, gitDiff);
+      shouldCleanupDiffFile = true;
+    }
 
     if (!gitDiff.trim()) {
       console.log("No changes to display");
       process.exit(0);
     }
-
-    // Write diff to temp file
-    const diffFile = join(tmpdir(), `critique-web-diff-${Date.now()}.patch`);
-    fs.writeFileSync(diffFile, gitDiff);
 
     // Spawn the TUI in a PTY to capture ANSI output
     let ansiOutput = "";
@@ -737,15 +757,21 @@ cli
       });
     });
 
-    // Clean up temp file
-    fs.unlinkSync(diffFile);
+    // Clean up temp file if we created it
+    if (shouldCleanupDiffFile) {
+      fs.unlinkSync(diffFile);
+    }
 
     if (!ansiOutput.trim()) {
-      console.log("No output captured");
+      if (!options.stdout) {
+        console.log("No output captured");
+      }
       process.exit(1);
     }
 
-    console.log("Converting to HTML...");
+    if (!options.stdout) {
+      console.log("Converting to HTML...");
+    }
 
     // Strip terminal cleanup sequences that clear the screen
     // The renderer outputs \x1b[H\x1b[J (cursor home + clear to end) on exit
@@ -756,6 +782,12 @@ cli
 
     // Convert ANSI to HTML document
     const html = ansiToHtmlDocument(ansiOutput, { cols, rows });
+
+    // Output to stdout (for E2B/programmatic use)
+    if (options.stdout) {
+      process.stdout.write(html);
+      process.exit(0);
+    }
 
     if (options.local) {
       // Save locally and open

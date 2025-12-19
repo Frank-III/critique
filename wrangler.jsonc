@@ -5,7 +5,7 @@
   "compatibility_date": "2025-05-26",
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": true,
-  
+
   // KV Namespace binding for storing HTML content
   "kv_namespaces": [
     {
@@ -18,5 +18,12 @@
   "routes": [
     { "pattern": "critique.work", "custom_domain": true },
     { "pattern": "www.critique.work", "custom_domain": true }
-  ]
+  ],
+
+  // Environment variables (secrets should be set via wrangler secret put)
+  // E2B_API_KEY: Set via `wrangler secret put E2B_API_KEY`
+  // GITHUB_TOKEN: Optional, set via `wrangler secret put GITHUB_TOKEN` for higher rate limits
+  "vars": {
+    "E2B_TEMPLATE": "critique-sandbox"
+  }
 }
