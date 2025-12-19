@@ -1,7 +1,6 @@
 import { Hono } from "hono"
 import { cors } from "hono/cors"
 import { handle } from "hono/vercel"
-import { writeFileSync, unlinkSync, mkdirSync, existsSync, readFileSync } from "fs"
 import { join, dirname } from "path"
 import { tmpdir } from "os"
 import { fileURLToPath } from "url"
@@ -136,23 +135,15 @@ async function renderDiffWithCritique(
   cols: number = 240,
   rows: number = 2000
 ): Promise<string> {
-  // Create temp directory if needed
-  const tempDir = join(tmpdir(), "critique")
-  if (!existsSync(tempDir)) {
-    mkdirSync(tempDir, { recursive: true })
-  }
-
-  // Write diff to temp file
-  const tempFile = join(tempDir, `diff-${Date.now()}-${Math.random().toString(36).slice(2)}.patch`)
-  writeFileSync(tempFile, diff, "utf-8")
+  // Write diff to temp file using Bun's native API
+  const tempFile = join(tmpdir(), `critique-${Date.now()}-${Math.random().toString(36).slice(2)}.patch`)
+  await Bun.write(tempFile, diff)
 
   try {
-    // Find the CLI path - in production it should be in node_modules/.bin/critique
-    // or we can use the src/cli.tsx directly
+    // Find the CLI path
     const cliPath = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "cli.tsx")
 
-    // Use Bun.spawn to run the critique CLI with PTY-like output capture
-    // The web command uses PTY internally, but we can also try calling it with --stdout
+    // Use Bun.spawn to run the critique CLI
     const proc = Bun.spawn([
       "bun", "run", cliPath,
       "web",
@@ -182,7 +173,8 @@ async function renderDiffWithCritique(
   } finally {
     // Cleanup temp file
     try {
-      unlinkSync(tempFile)
+      const { unlink } = await import("node:fs/promises")
+      await unlink(tempFile)
     } catch {
       // Ignore cleanup errors
     }
