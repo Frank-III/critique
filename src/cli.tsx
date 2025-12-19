@@ -1,21 +1,19 @@
 #!/usr/bin/env bun
 import { cac } from "cac";
-import { FileEditPreviewTitle, FileEditPreview } from "./diff.tsx";
 import {
-  createRoot,
+  render,
+  onResize,
   useKeyboard,
-  useOnResize,
   useRenderer,
   useTerminalDimensions,
-} from "@opentui/react";
-import * as React from "react";
+} from "@opentui/solid";
+import { createSignal, createEffect, onMount, onCleanup, For, Show, type JSX } from "solid-js";
 import { exec, execSync } from "child_process";
 import { promisify } from "util";
-import { createCliRenderer, MacOSScrollAccel } from "@opentui/core";
+import { createCliRenderer, MacOSScrollAccel, RGBA, type CliRendererConfig } from "@opentui/core";
 import fs from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { create } from "zustand";
 import Dropdown from "./dropdown.tsx";
 import * as watcher from "@parcel/watcher";
 import { debounce } from "./utils.ts";
@@ -35,15 +33,92 @@ const IGNORED_FILES = [
 
 const BACKGROUND_COLOR = "#0f0f0f";
 
-function getFileName(file: { oldFileName?: string; newFileName?: string }): string {
-  const newName = file.newFileName;
-  const oldName = file.oldFileName;
+// Theme colors for diff
+const ADDED_BG = RGBA.fromHex("#0d2818");
+const REMOVED_BG = RGBA.fromHex("#2d0f0f");
+const ADDED_LINE_NUMBER_BG = RGBA.fromHex("#1a4d2e");
+const REMOVED_LINE_NUMBER_BG = RGBA.fromHex("#4d1a1a");
+const LINE_NUMBER_BG = RGBA.fromHex("#0a0a0a");
+const LINE_NUMBER_FG = RGBA.fromHex("#666666");
 
-  // Filter out /dev/null which appears for new/deleted files
-  if (newName && newName !== "/dev/null") return newName;
-  if (oldName && oldName !== "/dev/null") return oldName;
+interface ParsedFile {
+  fileName: string;
+  diff: string;
+  additions: number;
+  deletions: number;
+}
 
-  return "unknown";
+function parseGitDiff(gitDiff: string): ParsedFile[] {
+  const files: ParsedFile[] = [];
+
+  // Split by file headers
+  const fileChunks = gitDiff.split(/(?=^diff --git )/gm).filter(chunk => chunk.trim());
+
+  for (const chunk of fileChunks) {
+    // Extract filename from the diff header
+    const headerMatch = chunk.match(/^diff --git a\/(.+?) b\/(.+?)$/m);
+    if (!headerMatch) continue;
+
+    const fileName = headerMatch[2] || headerMatch[1] || "unknown";
+    const baseName = fileName.split("/").pop() || "";
+
+    // Skip ignored files
+    if (IGNORED_FILES.includes(baseName) || baseName.endsWith(".lock")) {
+      continue;
+    }
+
+    // Count additions and deletions
+    const lines = chunk.split("\n");
+    let additions = 0;
+    let deletions = 0;
+
+    for (const line of lines) {
+      if (line.startsWith("+") && !line.startsWith("+++")) additions++;
+      if (line.startsWith("-") && !line.startsWith("---")) deletions++;
+    }
+
+    // Skip files with too many lines
+    if (additions + deletions > 6000) continue;
+
+    files.push({
+      fileName,
+      diff: chunk,
+      additions,
+      deletions,
+    });
+  }
+
+  // Sort by size (smaller first)
+  return files.sort((a, b) => (a.additions + a.deletions) - (b.additions + b.deletions));
+}
+
+function detectFiletype(fileName: string): string {
+  const ext = fileName.split(".").pop()?.toLowerCase();
+  const mapping: Record<string, string> = {
+    ts: "typescript",
+    tsx: "tsx",
+    js: "javascript",
+    jsx: "jsx",
+    json: "json",
+    md: "markdown",
+    py: "python",
+    rs: "rust",
+    go: "go",
+    java: "java",
+    c: "c",
+    cpp: "cpp",
+    h: "c",
+    hpp: "cpp",
+    css: "css",
+    html: "html",
+    yaml: "yaml",
+    yml: "yaml",
+    toml: "toml",
+    sh: "bash",
+    bash: "bash",
+    sql: "sql",
+  };
+  return mapping[ext || ""] || "text";
 }
 
 function execSyncWithError(
@@ -72,44 +147,32 @@ class ScrollAcceleration {
   }
   reset() {
     this.macosAccel.reset();
-    // this.multiplier = 1;
   }
 }
 
-interface DiffState {
-  currentFileIndex: number;
-}
-
-const useDiffStore = create<DiffState>(() => ({
-  currentFileIndex: 0,
-}));
+// Simple reactive store using signals
+const [currentFileIndex, setCurrentFileIndex] = createSignal(0);
 
 interface AppProps {
-  parsedFiles: Array<{
-    oldFileName?: string;
-    newFileName?: string;
-    hunks: any[];
-  }>;
+  files: ParsedFile[];
 }
 
-function App({ parsedFiles }: AppProps) {
-  const { width: initialWidth } = useTerminalDimensions();
-  const [width, setWidth] = React.useState(initialWidth);
-  const [scrollAcceleration] = React.useState(() => new ScrollAcceleration());
-  const currentFileIndex = useDiffStore((s) => s.currentFileIndex);
-  const [showDropdown, setShowDropdown] = React.useState(false);
+function App(props: AppProps): JSX.Element {
+  const dimensions = useTerminalDimensions();
+  const [width, setWidth] = createSignal(dimensions().width);
+  const scrollAcceleration = new ScrollAcceleration();
+  const [showDropdown, setShowDropdown] = createSignal(false);
 
-  useOnResize(
-    React.useCallback((newWidth: number) => {
-      setWidth(newWidth);
-    }, []),
-  );
-  const useSplitView = width >= 100;
+  onResize((newWidth: number) => {
+    setWidth(newWidth);
+  });
+
+  const useSplitView = () => width() >= 100 ? "split" : "unified";
 
   const renderer = useRenderer();
 
   useKeyboard((key) => {
-    if (showDropdown) {
+    if (showDropdown()) {
       if (key.name === "escape") {
         setShowDropdown(false);
       }
@@ -128,7 +191,6 @@ function App({ parsedFiles }: AppProps) {
       process.exit(0);
     }
     if (key.option) {
-      console.log(key);
       if (key.eventType === "release") {
         scrollAcceleration.multiplier = 1;
       } else {
@@ -136,140 +198,121 @@ function App({ parsedFiles }: AppProps) {
       }
     }
     if (key.name === "left") {
-      useDiffStore.setState((state) => ({
-        currentFileIndex: Math.max(0, state.currentFileIndex - 1),
-      }));
+      setCurrentFileIndex((prev) => Math.max(0, prev - 1));
     }
     if (key.name === "right") {
-      useDiffStore.setState((state) => ({
-        currentFileIndex: Math.min(parsedFiles.length - 1, state.currentFileIndex + 1),
-      }));
+      setCurrentFileIndex((prev) => Math.min(props.files.length - 1, prev + 1));
     }
   });
 
-  const { FileEditPreview } = require("./diff.tsx");
-
   // Ensure current index is valid
-  const validIndex = Math.min(currentFileIndex, parsedFiles.length - 1);
-  const currentFile = parsedFiles[validIndex];
+  const validIndex = () => Math.min(currentFileIndex(), props.files.length - 1);
+  const currentFile = () => props.files[validIndex()];
 
-  if (!currentFile) {
-    return (
-      <box style={{ padding: 1, backgroundColor: BACKGROUND_COLOR }}>
-        <text>No files to display</text>
-      </box>
-    );
-  }
-
-  const fileName = getFileName(currentFile);
-
-  // Calculate additions and deletions
-  let additions = 0;
-  let deletions = 0;
-  currentFile.hunks.forEach((hunk: any) => {
-    hunk.lines.forEach((line: string) => {
-      if (line.startsWith("+")) additions++;
-      if (line.startsWith("-")) deletions++;
-    });
-  });
-
-  const dropdownOptions = parsedFiles.map((file, idx) => {
-    const name = getFileName(file);
-    return {
-      title: name,
-      value: String(idx),
-      keywords: name.split("/"),
-    };
-  });
+  const dropdownOptions = () => props.files.map((file, idx) => ({
+    title: file.fileName,
+    value: String(idx),
+    keywords: file.fileName.split("/"),
+  }));
 
   const handleFileSelect = (value: string) => {
     const index = parseInt(value, 10);
-    useDiffStore.setState({ currentFileIndex: index });
+    setCurrentFileIndex(index);
     setShowDropdown(false);
   };
 
-  if (showDropdown) {
-    return (
-      <box
-        style={{ flexDirection: "column", height: "100%", padding: 1, backgroundColor: BACKGROUND_COLOR }}
-      >
-        <box style={{ flexDirection: "column", justifyContent: "center", flexGrow: 1 }}>
-          <Dropdown
-            tooltip="Select file"
-            options={dropdownOptions}
-            selectedValues={[String(validIndex)]}
-            onChange={handleFileSelect}
-            placeholder="Search files..."
-          />
-        </box>
-      </box>
-    );
-  }
-
   return (
-    <box
-      key={String(useSplitView)}
-      style={{ flexDirection: "column", height: "100%", padding: 1, backgroundColor: BACKGROUND_COLOR }}
-    >
-      {/* Navigation header */}
-      <box style={{ paddingBottom: 1, paddingLeft: 1, paddingRight: 1, flexShrink: 0, flexDirection: "row", alignItems: "center" }}>
-        <text fg="#ffffff">←</text>
-        <box flexGrow={1} />
-        <text onMouseDown={() => setShowDropdown(true)}>
-          {fileName.trim()}
-        </text>
-        <text fg="#00ff00"> +{additions}</text>
-        <text fg="#ff0000">-{deletions}</text>
-        <box flexGrow={1} />
-        <text fg="#ffffff">→</text>
-      </box>
-
-      <scrollbox
-        scrollAcceleration={scrollAcceleration}
-        style={{
-          flexGrow: 1,
-          rootOptions: {
-            backgroundColor: "transparent",
-            border: false,
-          },
-
-          scrollbarOptions: {
-            showArrows: false,
-            trackOptions: {
-              foregroundColor: "#4a4a4a",
-              backgroundColor: "transparent",
-            },
-          },
-        }}
-        focused
-      >
-        <box style={{ flexDirection: "column" }}>
-          <FileEditPreview
-            hunks={currentFile.hunks}
-            paddingLeft={0}
-            splitView={useSplitView}
-            filePath={fileName}
-          />
+    <Show
+      when={currentFile()}
+      fallback={
+        <box style={{ padding: 1, backgroundColor: BACKGROUND_COLOR }}>
+          <text>No files to display</text>
         </box>
-      </scrollbox>
+      }
+    >
+      <Show
+        when={!showDropdown()}
+        fallback={
+          <box
+            style={{ flexDirection: "column", height: "100%", padding: 1, backgroundColor: BACKGROUND_COLOR }}
+          >
+            <box style={{ flexDirection: "column", justifyContent: "center", flexGrow: 1 }}>
+              <Dropdown
+                tooltip="Select file"
+                options={dropdownOptions()}
+                selectedValues={[String(validIndex())]}
+                onChange={handleFileSelect}
+                placeholder="Search files..."
+              />
+            </box>
+          </box>
+        }
+      >
+        <box
+          style={{ flexDirection: "column", height: "100%", padding: 1, backgroundColor: BACKGROUND_COLOR }}
+        >
+          {/* Navigation header */}
+          <box style={{ paddingBottom: 1, paddingLeft: 1, paddingRight: 1, flexShrink: 0, flexDirection: "row", alignItems: "center" }}>
+            <text fg="#ffffff">←</text>
+            <box flexGrow={1} />
+            <text onMouseDown={() => setShowDropdown(true)}>
+              {currentFile()!.fileName.trim()}
+            </text>
+            <text fg="#00ff00"> +{currentFile()!.additions}</text>
+            <text fg="#ff0000"> -{currentFile()!.deletions}</text>
+            <box flexGrow={1} />
+            <text fg="#ffffff">→</text>
+          </box>
 
-      {/* Bottom navigation */}
-      <box style={{ paddingTop: 1, paddingLeft: 1, paddingRight: 1, flexShrink: 0, flexDirection: "row", alignItems: "center" }}>
-        <text fg="#ffffff">←</text>
-        <text fg="#666666"> prev file</text>
-        <box flexGrow={1} />
-        <text fg="#ffffff">ctrl p</text>
-        <text fg="#666666"> select file </text>
-        <text fg="#666666">({validIndex + 1}/{parsedFiles.length})</text>
-        <box flexGrow={1} />
-        <text fg="#666666">next file </text>
-        <text fg="#ffffff">→</text>
-      </box>
-    </box>
+          <scrollbox
+            scrollAcceleration={scrollAcceleration}
+            style={{
+              flexGrow: 1,
+              rootOptions: {
+                backgroundColor: "transparent",
+                border: false,
+              },
+              scrollbarOptions: {
+                showArrows: false,
+                trackOptions: {
+                  foregroundColor: "#4a4a4a",
+                  backgroundColor: "transparent",
+                },
+              },
+            }}
+            focused
+          >
+            <diff
+              diff={currentFile()!.diff}
+              view={useSplitView()}
+              filetype={detectFiletype(currentFile()!.fileName)}
+              showLineNumbers={true}
+              addedBg={ADDED_BG}
+              removedBg={REMOVED_BG}
+              addedLineNumberBg={ADDED_LINE_NUMBER_BG}
+              removedLineNumberBg={REMOVED_LINE_NUMBER_BG}
+              lineNumberBg={LINE_NUMBER_BG}
+              lineNumberFg={LINE_NUMBER_FG}
+            />
+          </scrollbox>
+
+          {/* Bottom navigation */}
+          <box style={{ paddingTop: 1, paddingLeft: 1, paddingRight: 1, flexShrink: 0, flexDirection: "row", alignItems: "center" }}>
+            <text fg="#ffffff">←</text>
+            <text fg="#666666"> prev file</text>
+            <box flexGrow={1} />
+            <text fg="#ffffff">ctrl p</text>
+            <text fg="#666666"> select file </text>
+            <text fg="#666666">({validIndex() + 1}/{props.files.length})</text>
+            <box flexGrow={1} />
+            <text fg="#666666">next file </text>
+            <text fg="#ffffff">→</text>
+          </box>
+        </box>
+      </Show>
+    </Show>
   );
 }
-
-
 
 cli
   .command(
@@ -282,27 +325,18 @@ cli
   .action(async (ref, options) => {
     try {
       const gitCommand = (() => {
-        if (options.staged) return "git diff --cached --no-prefix";
-        if (options.commit) return `git show ${options.commit} --no-prefix`;
-        if (ref) return `git show ${ref} --no-prefix`;
-        return "git add -N . && git diff --no-prefix";
+        if (options.staged) return "git diff --cached";
+        if (options.commit) return `git show ${options.commit}`;
+        if (ref) return `git show ${ref}`;
+        return "git add -N . && git diff";
       })();
-
-      const [diffModule, { parsePatch }] = await Promise.all([
-        import("./diff.tsx"),
-        import("diff"),
-      ]);
 
       const shouldWatch = options.watch && !ref && !options.commit;
 
-      function AppWithWatch() {
-        const [parsedFiles, setParsedFiles] = React.useState<Array<{
-          oldFileName?: string;
-          newFileName?: string;
-          hunks: any[];
-        }> | null>(null);
+      function AppWithWatch(): JSX.Element {
+        const [files, setFiles] = createSignal<ParsedFile[] | null>(null);
 
-        React.useEffect(() => {
+        onMount(() => {
           const fetchDiff = async () => {
             try {
               const { stdout: gitDiff } = await execAsync(gitCommand, {
@@ -310,110 +344,85 @@ cli
               });
 
               if (!gitDiff.trim()) {
-                setParsedFiles([]);
+                setFiles([]);
                 return;
               }
 
-              const files = parsePatch(gitDiff);
-
-              const filteredFiles = files.filter((file) => {
-                const fileName = getFileName(file);
-                const baseName = fileName.split("/").pop() || "";
-
-                if (IGNORED_FILES.includes(baseName) || baseName.endsWith(".lock")) {
-                  return false;
-                }
-
-                const totalLines = file.hunks.reduce((sum, hunk) => sum + hunk.lines.length, 0);
-                return totalLines <= 6000;
-              });
-
-              const sortedFiles = filteredFiles.sort((a, b) => {
-                const aSize = a.hunks.reduce((sum, hunk) => sum + hunk.lines.length, 0);
-                const bSize = b.hunks.reduce((sum, hunk) => sum + hunk.lines.length, 0);
-                return aSize - bSize;
-              });
-
-              setParsedFiles(sortedFiles);
+              const parsedFiles = parseGitDiff(gitDiff);
+              setFiles(parsedFiles);
             } catch (error) {
-              setParsedFiles([]);
+              setFiles([]);
             }
           };
 
           fetchDiff();
 
-          if (!shouldWatch) {
-            return;
-          }
+          if (shouldWatch) {
+            const cwd = process.cwd();
 
-          const cwd = process.cwd();
+            const debouncedFetch = debounce(() => {
+              fetchDiff();
+            }, 200);
 
-          const debouncedFetch = debounce(() => {
-            fetchDiff();
-          }, 200);
+            let subscription: watcher.AsyncSubscription | undefined;
 
-          let subscription: watcher.AsyncSubscription | undefined;
+            watcher
+              .subscribe(cwd, (err, events) => {
+                if (err) {
+                  return;
+                }
 
-          watcher
-            .subscribe(cwd, (err, events) => {
-              if (err) {
-                return;
+                if (events.length > 0) {
+                  debouncedFetch();
+                }
+              })
+              .then((sub) => {
+                subscription = sub;
+              });
+
+            onCleanup(() => {
+              if (subscription) {
+                subscription.unsubscribe();
               }
-
-              if (events.length > 0) {
-                debouncedFetch();
-              }
-            })
-            .then((sub) => {
-              subscription = sub;
             });
-
-          return () => {
-            if (subscription) {
-              subscription.unsubscribe();
-            }
-          };
-        }, []);
+          }
+        });
 
         // Ensure currentFileIndex stays valid when files change
-        React.useEffect(() => {
-          if (parsedFiles && parsedFiles.length > 0) {
-            const currentIndex = useDiffStore.getState().currentFileIndex;
-            if (currentIndex >= parsedFiles.length) {
-              useDiffStore.setState({ currentFileIndex: parsedFiles.length - 1 });
+        createEffect(() => {
+          const f = files();
+          if (f && f.length > 0) {
+            const idx = currentFileIndex();
+            if (idx >= f.length) {
+              setCurrentFileIndex(f.length - 1);
             }
           }
-        }, [parsedFiles]);
+        });
 
-        if (parsedFiles === null) {
-          return (
-            <box style={{ padding: 1, backgroundColor: BACKGROUND_COLOR }}>
-              <text>Loading...</text>
-            </box>
-          );
-        }
-
-        if (parsedFiles.length === 0) {
-          return (
-            <box style={{ padding: 1, backgroundColor: BACKGROUND_COLOR }}>
-              <text>No changes to display</text>
-            </box>
-          );
-        }
-
-        return <App parsedFiles={parsedFiles} />;
+        return (
+          <Show
+            when={files() !== null}
+            fallback={
+              <box style={{ padding: 1, backgroundColor: BACKGROUND_COLOR }}>
+                <text>Loading...</text>
+              </box>
+            }
+          >
+            <Show
+              when={files()!.length > 0}
+              fallback={
+                <box style={{ padding: 1, backgroundColor: BACKGROUND_COLOR }}>
+                  <text>No changes to display</text>
+                </box>
+              }
+            >
+              <App files={files()!} />
+            </Show>
+          </Show>
+        );
       }
 
-      const { ErrorBoundary } = diffModule;
-
-      const renderer = await createCliRenderer();
-      createRoot(renderer).render(
-        React.createElement(
-          ErrorBoundary,
-          null,
-          React.createElement(AppWithWatch)
-        )
-      );
+      await render(() => <AppWithWatch />);
     } catch (error) {
       console.error("Error getting git diff:", error);
       process.exit(1);
@@ -431,11 +440,10 @@ cli
     }
 
     try {
-      const [localContent, remoteContent, diffModule, { structuredPatch }] =
+      const [localContent, remoteContent, { structuredPatch }] =
         await Promise.all([
           fs.readFileSync(local, "utf-8"),
           fs.readFileSync(remote, "utf-8"),
-          import("./diff.tsx"),
           import("diff"),
         ]);
 
@@ -453,16 +461,27 @@ cli
         process.exit(0);
       }
 
-      const { ErrorBoundary } = diffModule;
+      // Reconstruct a diff string from the patch
+      const diffLines = [
+        `diff --git a/${local} b/${remote}`,
+        `--- a/${local}`,
+        `+++ b/${remote}`,
+      ];
 
-      const renderer = await createCliRenderer();
-      createRoot(renderer).render(
-        React.createElement(
-          ErrorBoundary,
-          null,
-          React.createElement(App, { parsedFiles: [patch] })
-        )
-      );
+      for (const hunk of patch.hunks) {
+        diffLines.push(`@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@`);
+        diffLines.push(...hunk.lines);
+      }
+
+      const diffString = diffLines.join("\n");
+      const files: ParsedFile[] = [{
+        fileName: remote,
+        diff: diffString,
+        additions: patch.hunks.reduce((acc, h) => acc + h.lines.filter(l => l.startsWith("+")).length, 0),
+        deletions: patch.hunks.reduce((acc, h) => acc + h.lines.filter(l => l.startsWith("-")).length, 0),
+      }];
+
+      await render(() => <App files={files} />);
     } catch (error) {
       console.error("Error displaying diff:", error);
       process.exit(1);
@@ -508,32 +527,20 @@ cli
         process.exit(0);
       }
 
-      interface PickState {
-        selectedFiles: Set<string>;
-        appliedFiles: Map<string, boolean>; // Track which files have patches applied
-        message: string;
-        messageType: "info" | "error" | "success" | "";
-      }
-
-      const usePickStore = create<PickState>(() => ({
-        selectedFiles: new Set(),
-        appliedFiles: new Map(),
-        message: "",
-        messageType: "",
-      }));
+      // Simple reactive store for pick state
+      const [selectedFiles, setSelectedFiles] = createSignal<Set<string>>(new Set());
+      const [appliedFiles, setAppliedFiles] = createSignal<Map<string, boolean>>(new Map());
+      const [message, setMessage] = createSignal("");
+      const [messageType, setMessageType] = createSignal<"info" | "error" | "success" | "">("");
 
       interface PickAppProps {
         files: string[];
         branch: string;
       }
 
-      function PickApp({ files, branch }: PickAppProps) {
-        const selectedFiles = usePickStore((s) => s.selectedFiles);
-        const message = usePickStore((s) => s.message);
-        const messageType = usePickStore((s) => s.messageType);
-
+      function PickApp(props: PickAppProps): JSX.Element {
         const handleChange = async (value: string) => {
-          const isSelected = selectedFiles.has(value);
+          const isSelected = selectedFiles().has(value);
 
           if (isSelected) {
             const { error } = execSyncWithError(
@@ -547,31 +554,31 @@ cli
                   fs.unlinkSync(value);
                 }
               } else {
-                usePickStore.setState({
-                  message: `Failed to restore ${value}: ${error}`,
-                  messageType: "error",
-                });
+                setMessage(`Failed to restore ${value}: ${error}`);
+                setMessageType("error");
                 return;
               }
             }
 
-            usePickStore.setState((state) => ({
-              selectedFiles: new Set(
-                Array.from(state.selectedFiles).filter((f) => f !== value),
-              ),
-              appliedFiles: new Map(
-                Array.from(state.appliedFiles).filter(([k]) => k !== value),
-              ),
-            }));
+            setSelectedFiles((prev) => {
+              const next = new Set(prev);
+              next.delete(value);
+              return next;
+            });
+            setAppliedFiles((prev) => {
+              const next = new Map(prev);
+              next.delete(value);
+              return next;
+            });
           } else {
             const { stdout: mergeBase } = await execAsync(
-              `git merge-base HEAD ${branch}`,
+              `git merge-base HEAD ${props.branch}`,
               { encoding: "utf-8" },
             );
             const base = mergeBase.trim();
 
             const { stdout: patchData } = await execAsync(
-              `git diff ${base} ${branch} -- ${value}`,
+              `git diff ${base} ${props.branch} -- ${value}`,
               { encoding: "utf-8" },
             );
 
@@ -594,10 +601,8 @@ cli
               });
 
               if (result2.error) {
-                usePickStore.setState({
-                  message: `Failed to apply ${value}: ${result2.error}`,
-                  messageType: "error",
-                });
+                setMessage(`Failed to apply ${value}: ${result2.error}`);
+                setMessageType("error");
                 fs.unlinkSync(patchFile);
                 return;
               }
@@ -612,29 +617,35 @@ cli
 
             const hasConflict = conflictCheck.trim().length > 0;
 
-            usePickStore.setState((state) => ({
-              selectedFiles: new Set([...state.selectedFiles, value]),
-              appliedFiles: new Map([...state.appliedFiles, [value, true]]),
-              message: hasConflict ? `Applied ${value} with conflicts` : `Applied ${value}`,
-              messageType: hasConflict ? "error" : "",
-            }));
+            setSelectedFiles((prev) => {
+              const next = new Set(prev);
+              next.add(value);
+              return next;
+            });
+            setAppliedFiles((prev) => {
+              const next = new Map(prev);
+              next.set(value, true);
+              return next;
+            });
+            setMessage(hasConflict ? `Applied ${value} with conflicts` : `Applied ${value}`);
+            setMessageType(hasConflict ? "error" : "");
           }
         };
 
         return (
           <box style={{ padding: 1, flexDirection: "column", backgroundColor: BACKGROUND_COLOR }}>
             <Dropdown
-              tooltip={`Pick files from "${branch}"`}
+              tooltip={`Pick files from "${props.branch}"`}
               onChange={handleChange}
-              selectedValues={Array.from(selectedFiles)}
+              selectedValues={Array.from(selectedFiles())}
               placeholder="Search files..."
-              options={files.map((file) => ({
+              options={props.files.map((file) => ({
                 value: file,
                 title: "/" + file,
                 keywords: file.split("/"),
               }))}
             />
-            {message && (
+            <Show when={message()}>
               <box
                 style={{
                   paddingLeft: 2,
@@ -647,23 +658,22 @@ cli
               >
                 <text
                   fg={
-                    messageType === "error"
+                    messageType() === "error"
                       ? "#ff6b6b"
-                      : messageType === "success"
+                      : messageType() === "success"
                         ? "#51cf66"
                         : "#ffffff"
                   }
                 >
-                  {message}
+                  {message()}
                 </text>
               </box>
-            )}
+            </Show>
           </box>
         );
       }
 
-      const renderer = await createCliRenderer();
-      createRoot(renderer).render(<PickApp files={files} branch={branch} />);
+      await render(() => <PickApp files={files} branch={branch} />);
     } catch (error) {
       console.error(
         `Error: ${error instanceof Error ? error.message : String(error)}`,
@@ -679,36 +689,56 @@ cli
   .command("web [ref]", "Generate web preview of diff")
   .option("--staged", "Show staged changes")
   .option("--commit <ref>", "Show changes from a specific commit")
+  .option("--patch <file>", "Use diff from a patch file instead of git")
   .option("--cols <cols>", "Number of columns for rendering (use ~100 for mobile)", { default: 240 })
   .option("--rows <rows>", "Number of rows for rendering", { default: 2000 })
   .option("--local", "Open local preview instead of uploading")
+  .option("--stdout", "Output HTML to stdout instead of uploading")
   .action(async (ref, options) => {
     const pty = await import("@xmorse/bun-pty");
     const { ansiToHtmlDocument } = await import("./ansi-html.ts");
 
-    const gitCommand = (() => {
-      if (options.staged) return "git diff --cached --no-prefix";
-      if (options.commit) return `git show ${options.commit} --no-prefix`;
-      if (ref) return `git show ${ref} --no-prefix`;
-      return "git add -N . && git diff --no-prefix";
-    })();
-
     const cols = parseInt(options.cols) || 240;
     const rows = parseInt(options.rows) || 2000;
 
-    console.log("Capturing diff output...");
+    let gitDiff: string;
+    let diffFile: string;
+    let shouldCleanupDiffFile = false;
 
-    // Get the git diff first
-    const { stdout: gitDiff } = await execAsync(gitCommand, { encoding: "utf-8" });
+    if (options.patch) {
+      // Read diff from provided patch file
+      if (!fs.existsSync(options.patch)) {
+        console.error(`Patch file not found: ${options.patch}`);
+        process.exit(1);
+      }
+      gitDiff = fs.readFileSync(options.patch, "utf-8");
+      diffFile = options.patch;
+    } else {
+      // Get diff from git
+      const gitCommand = (() => {
+        if (options.staged) return "git diff --cached";
+        if (options.commit) return `git show ${options.commit}`;
+        if (ref) return `git show ${ref}`;
+        return "git add -N . && git diff";
+      })();
+
+      if (!options.stdout) {
+        console.log("Capturing diff output...");
+      }
+
+      const { stdout } = await execAsync(gitCommand, { encoding: "utf-8" });
+      gitDiff = stdout;
+
+      // Write diff to temp file
+      diffFile = join(tmpdir(), `critique-web-diff-${Date.now()}.patch`);
+      fs.writeFileSync(diffFile, gitDiff);
+      shouldCleanupDiffFile = true;
+    }
 
     if (!gitDiff.trim()) {
       console.log("No changes to display");
       process.exit(0);
     }
-
-    // Write diff to temp file
-    const diffFile = join(tmpdir(), `critique-web-diff-${Date.now()}.patch`);
-    fs.writeFileSync(diffFile, gitDiff);
 
     // Spawn the TUI in a PTY to capture ANSI output
     let ansiOutput = "";
@@ -737,15 +767,21 @@ cli
       });
     });
 
-    // Clean up temp file
-    fs.unlinkSync(diffFile);
+    // Clean up temp file if we created it
+    if (shouldCleanupDiffFile) {
+      fs.unlinkSync(diffFile);
+    }
 
     if (!ansiOutput.trim()) {
-      console.log("No output captured");
+      if (!options.stdout) {
+        console.log("No output captured");
+      }
       process.exit(1);
     }
 
-    console.log("Converting to HTML...");
+    if (!options.stdout) {
+      console.log("Converting to HTML...");
+    }
 
     // Strip terminal cleanup sequences that clear the screen
     // The renderer outputs \x1b[H\x1b[J (cursor home + clear to end) on exit
@@ -756,6 +792,12 @@ cli
 
     // Convert ANSI to HTML document
     const html = ansiToHtmlDocument(ansiOutput, { cols, rows });
+
+    // Output to stdout (for E2B/programmatic use)
+    if (options.stdout) {
+      process.stdout.write(html);
+      process.exit(0);
+    }
 
     if (options.local) {
       // Save locally and open
@@ -821,104 +863,65 @@ cli
     const cols = parseInt(options.cols) || 120;
     const rows = parseInt(options.rows) || 40;
 
-    const [diffModule, { parsePatch }] = await Promise.all([
-      import("./diff.tsx"),
-      import("diff"),
-    ]);
-
     const gitDiff = fs.readFileSync(diffFile, "utf-8");
-    const files = parsePatch(gitDiff);
+    const files = parseGitDiff(gitDiff);
 
-    const filteredFiles = files.filter((file) => {
-      const fileName = getFileName(file);
-      const baseName = fileName.split("/").pop() || "";
-      if (IGNORED_FILES.includes(baseName) || baseName.endsWith(".lock")) {
-        return false;
-      }
-      const totalLines = file.hunks.reduce((sum, hunk) => sum + hunk.lines.length, 0);
-      return totalLines <= 6000;
-    });
-
-    const sortedFiles = filteredFiles.sort((a, b) => {
-      const aSize = a.hunks.reduce((sum, hunk) => sum + hunk.lines.length, 0);
-      const bSize = b.hunks.reduce((sum, hunk) => sum + hunk.lines.length, 0);
-      return aSize - bSize;
-    });
-
-    if (sortedFiles.length === 0) {
+    if (files.length === 0) {
       console.log("No files to display");
       process.exit(0);
     }
-
-    const { FileEditPreview, ErrorBoundary } = diffModule;
 
     // Override terminal size
     process.stdout.columns = cols;
     process.stdout.rows = rows;
 
-    const renderer = await createCliRenderer({
-      exitOnCtrlC: false,
-      useAlternateScreen: false,
-    });
-
-    // Track if we've rendered once
-    let hasRendered = false;
-    const originalRequestRender = renderer.root.requestRender.bind(renderer.root);
-    renderer.root.requestRender = function() {
-      if (hasRendered) return; // Skip subsequent renders
-      hasRendered = true;
-      originalRequestRender();
-      // Exit after the first render completes
-      setTimeout(() => {
-        renderer.destroy();
-        process.exit(0);
-      }, 100);
-    };
-
     // Use unified diff for narrow viewports (mobile), split view for wider ones
-    const useSplitView = cols >= 150;
+    const useSplitView = cols >= 150 ? "split" : "unified";
 
-    // Static component - no hooks that cause re-renders
-    function WebApp() {
+    // Static component - renders once and exits
+    function WebApp(): JSX.Element {
+      onMount(() => {
+        // Exit after the first render completes
+        setTimeout(() => {
+          process.exit(0);
+        }, 100);
+      });
+
       return (
         <box style={{ flexDirection: "column", height: "100%", padding: 1, backgroundColor: BACKGROUND_COLOR }}>
-          {sortedFiles.map((file, idx) => {
-            const fileName = getFileName(file);
-            let additions = 0;
-            let deletions = 0;
-            file.hunks.forEach((hunk: any) => {
-              hunk.lines.forEach((line: string) => {
-                if (line.startsWith("+")) additions++;
-                if (line.startsWith("-")) deletions++;
-              });
-            });
-
-            return (
-              <box key={idx} style={{ flexDirection: "column", marginBottom: 2 }}>
+          <For each={files}>
+            {(file) => (
+              <box style={{ flexDirection: "column", marginBottom: 2 }}>
                 <box style={{ paddingBottom: 1, paddingLeft: 1, paddingRight: 1, flexShrink: 0, flexDirection: "row", alignItems: "center" }}>
-                  <text>{fileName.trim()}</text>
-                  <text fg="#00ff00"> +{additions}</text>
-                  <text fg="#ff0000">-{deletions}</text>
+                  <text>{file.fileName.trim()}</text>
+                  <text fg="#00ff00"> +{file.additions}</text>
+                  <text fg="#ff0000"> -{file.deletions}</text>
                 </box>
-                <FileEditPreview
-                  hunks={file.hunks}
-                  paddingLeft={0}
-                  splitView={useSplitView}
-                  filePath={fileName}
+                <diff
+                  diff={file.diff}
+                  view={useSplitView}
+                  filetype={detectFiletype(file.fileName)}
+                  showLineNumbers={true}
+                  addedBg={ADDED_BG}
+                  removedBg={REMOVED_BG}
+                  addedLineNumberBg={ADDED_LINE_NUMBER_BG}
+                  removedLineNumberBg={REMOVED_LINE_NUMBER_BG}
+                  lineNumberBg={LINE_NUMBER_BG}
+                  lineNumberFg={LINE_NUMBER_FG}
                 />
               </box>
-            );
-          })}
+            )}
+          </For>
         </box>
       );
     }
 
-    createRoot(renderer).render(
-      React.createElement(ErrorBoundary, null, React.createElement(WebApp))
-    );
+    await render(() => <WebApp />, {
+      exitOnCtrlC: false,
+      useAlternateScreen: false,
+    });
   });
 
 cli.help();
 cli.version("1.0.0");
-// comment
 cli.parse();

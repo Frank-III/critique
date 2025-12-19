@@ -1,19 +1,12 @@
-import React, {
-  useState,
-  useEffect,
-  useRef,
-  type ReactNode,
-} from "react";
-import { useKeyboard } from "@opentui/react";
+import { createSignal, createEffect, For, Show, type JSX } from "solid-js";
+import { useKeyboard } from "@opentui/solid";
 import { TextAttributes } from "@opentui/core";
 import { Theme } from "./theme";
-
-const logger = console;
 
 export interface DropdownOption {
   title: string;
   value: string;
-  icon?: ReactNode;
+  icon?: JSX.Element;
   keywords?: string[];
   label?: string;
 }
@@ -28,54 +21,56 @@ export interface DropdownProps {
   onChange?: (newValue: string) => void;
 }
 
-const Dropdown = (props: DropdownProps) => {
-  const {
-    tooltip,
-    onChange,
-    selectedValues = [],
-    options,
-    placeholder = "Search…",
-    itemsPerPage = 10,
-  } = props;
+const Dropdown = (props: DropdownProps): JSX.Element => {
+  const tooltip = () => props.tooltip;
+  const onChange = () => props.onChange;
+  const selectedValues = () => props.selectedValues ?? [];
+  const options = () => props.options;
+  const placeholder = () => props.placeholder ?? "Search…";
+  const itemsPerPage = () => props.itemsPerPage ?? 10;
 
-  const [selected, setSelected] = useState(0);
-  const [offset, setOffset] = useState(0);
-  const [searchText, setSearchText] = useState("");
-  const inputRef = useRef<any>(null);
+  const [selected, setSelected] = createSignal(0);
+  const [offset, setOffset] = createSignal(0);
+  const [searchText, setSearchText] = createSignal("");
+  let inputRef: any;
 
   const inFocus = true;
 
   // Filter options based on search
-  const filteredOptions = options.filter((option) => {
-    if (!searchText.trim()) return true;
-    const needles = searchText.toLowerCase().trim().split(/\s+/);
-    const searchableText = [option.title, ...(option.keywords || [])]
-      .filter(Boolean)
-      .join(" ")
-      .toLowerCase();
-    return needles.every((needle) => searchableText.includes(needle));
-  });
+  const filteredOptions = () => {
+    const text = searchText();
+    return options().filter((option) => {
+      if (!text.trim()) return true;
+      const needles = text.toLowerCase().trim().split(/\s+/);
+      const searchableText = [option.title, ...(option.keywords || [])]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+      return needles.every((needle) => searchableText.includes(needle));
+    });
+  };
 
   // Get visible options for current page
-  const visibleOptions = filteredOptions.slice(offset, offset + itemsPerPage);
+  const visibleOptions = () => filteredOptions().slice(offset(), offset() + itemsPerPage());
 
   // Reset selected index and offset when search changes
-  useEffect(() => {
+  createEffect(() => {
+    searchText(); // Track searchText
     setSelected(0);
     setOffset(0);
-  }, [searchText]);
+  });
 
   const move = (direction: -1 | 1) => {
-    const itemCount = filteredOptions.length;
+    const itemCount = filteredOptions().length;
     if (itemCount === 0) return;
 
     if (direction === 1) {
       setSelected((prev) => {
         const nextIndex = (prev + 1) % itemCount;
 
-        const visibleEnd = offset + itemsPerPage - 1;
+        const visibleEnd = offset() + itemsPerPage() - 1;
         if (prev === visibleEnd && nextIndex < itemCount && nextIndex > prev) {
-          setOffset(offset + 1);
+          setOffset(offset() + 1);
         } else if (nextIndex < prev) {
           setOffset(0);
         }
@@ -86,10 +81,10 @@ const Dropdown = (props: DropdownProps) => {
       setSelected((prev) => {
         const nextIndex = (prev - 1 + itemCount) % itemCount;
 
-        if (nextIndex < offset) {
+        if (nextIndex < offset()) {
           setOffset(Math.max(0, nextIndex));
-        } else if (nextIndex >= offset + itemsPerPage) {
-          setOffset(Math.max(0, itemCount - itemsPerPage));
+        } else if (nextIndex >= offset() + itemsPerPage()) {
+          setOffset(Math.max(0, itemCount - itemsPerPage()));
         }
 
         return nextIndex;
@@ -98,8 +93,9 @@ const Dropdown = (props: DropdownProps) => {
   };
 
   const selectItem = (itemValue: string) => {
-    if (onChange) {
-      onChange(itemValue);
+    const cb = onChange();
+    if (cb) {
+      cb(itemValue);
     }
   };
 
@@ -112,7 +108,7 @@ const Dropdown = (props: DropdownProps) => {
       move(1);
     }
     if (evt.name === "return") {
-      const currentOption = filteredOptions[selected];
+      const currentOption = filteredOptions()[selected()];
       if (currentOption) {
         selectItem(currentOption.value);
       }
@@ -129,16 +125,16 @@ const Dropdown = (props: DropdownProps) => {
               justifyContent: "space-between",
             }}
           >
-            <text attributes={TextAttributes.BOLD}>{tooltip}</text>
+            <text attributes={TextAttributes.BOLD}>{tooltip()}</text>
             <text fg={Theme.textMuted}>esc</text>
           </box>
           <box style={{ paddingTop: 1, paddingBottom: 2 }}>
             <input
               ref={inputRef}
-              onInput={(value) => setSearchText(value)}
-              placeholder={placeholder}
+              onInput={(value: string) => setSearchText(value)}
+              placeholder={placeholder()}
               focused={inFocus}
-              value={searchText}
+              value={searchText()}
               focusedBackgroundColor={Theme.backgroundPanel}
               cursorColor={Theme.primary}
               focusedTextColor={Theme.textMuted}
@@ -146,25 +142,27 @@ const Dropdown = (props: DropdownProps) => {
           </box>
         </box>
         <box style={{ paddingBottom: 1 }}>
-          {visibleOptions.map((option, idx) => {
-            const globalIndex = offset + idx;
-            const isActive = globalIndex === selected;
-            const isCurrent = selectedValues.includes(option.value);
+          <For each={visibleOptions()}>
+            {(option, idx) => {
+              const globalIndex = () => offset() + idx();
+              const isActive = () => globalIndex() === selected();
+              const isCurrent = () => selectedValues().includes(option.value);
 
-            return (
-              <box key={option.value}>
-                <ItemOption
-                  title={option.title}
-                  icon={option.icon}
-                  active={isActive}
-                  current={isCurrent}
-                  label={option.label}
-                  onMouseMove={() => setSelected(globalIndex)}
-                  onMouseDown={() => selectItem(option.value)}
-                />
-              </box>
-            );
-          })}
+              return (
+                <box>
+                  <ItemOption
+                    title={option.title}
+                    icon={option.icon}
+                    active={isActive()}
+                    current={isCurrent()}
+                    label={option.label}
+                    onMouseMove={() => setSelected(globalIndex())}
+                    onMouseDown={() => selectItem(option.value)}
+                  />
+                </box>
+              );
+            }}
+          </For>
         </box>
       </box>
       <box
@@ -192,14 +190,14 @@ const Dropdown = (props: DropdownProps) => {
 
 function ItemOption(props: {
   title: string;
-  icon?: ReactNode;
+  icon?: JSX.Element;
   active?: boolean;
   current?: boolean;
   label?: string;
   onMouseDown?: () => void;
   onMouseMove?: () => void;
-}) {
-  const [isHovered, setIsHovered] = useState(false);
+}): JSX.Element {
+  const [isHovered, setIsHovered] = createSignal(false);
 
   return (
     <box
@@ -207,7 +205,7 @@ function ItemOption(props: {
         flexDirection: "row",
         backgroundColor: props.active
           ? Theme.primary
-          : isHovered
+          : isHovered()
             ? Theme.backgroundPanel
             : undefined,
         paddingLeft: props.active ? 0 : 1,
@@ -223,19 +221,19 @@ function ItemOption(props: {
       onMouseDown={props.onMouseDown}
     >
       <box style={{ flexDirection: "row" }}>
-        {props.active && (
+        <Show when={props.active}>
           <text fg={Theme.background} selectable={false}>
             ›{""}
           </text>
-        )}
-        {props.icon && (
+        </Show>
+        <Show when={props.icon}>
           <text
             fg={props.active ? Theme.background : Theme.text}
             selectable={false}
           >
             {String(props.icon)}{" "}
           </text>
-        )}
+        </Show>
         <text
           fg={
             props.active
@@ -250,7 +248,7 @@ function ItemOption(props: {
           {props.title}
         </text>
       </box>
-      {props.label && (
+      <Show when={props.label}>
         <text
           fg={props.active ? Theme.background : Theme.textMuted}
           attributes={props.active ? TextAttributes.BOLD : undefined}
@@ -258,7 +256,7 @@ function ItemOption(props: {
         >
           {props.label}
         </text>
-      )}
+      </Show>
     </box>
   );
 }
