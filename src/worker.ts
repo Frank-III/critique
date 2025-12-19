@@ -49,7 +49,7 @@ function parseGitHubUrl(path: string): GitHubInfo | null {
 
   // Match: owner/repo/pull/123
   const prMatch = path.match(/^([^/]+)\/([^/]+)\/pull\/(\d+)$/)
-  if (prMatch) {
+  if (prMatch && prMatch[1] && prMatch[2] && prMatch[3]) {
     return {
       type: "pull",
       owner: prMatch[1],
@@ -60,7 +60,7 @@ function parseGitHubUrl(path: string): GitHubInfo | null {
 
   // Match: owner/repo/commit/sha
   const commitMatch = path.match(/^([^/]+)\/([^/]+)\/commit\/([a-f0-9]+)$/i)
-  if (commitMatch) {
+  if (commitMatch && commitMatch[1] && commitMatch[2] && commitMatch[3]) {
     return {
       type: "commit",
       owner: commitMatch[1],
@@ -71,7 +71,7 @@ function parseGitHubUrl(path: string): GitHubInfo | null {
 
   // Match: owner/repo/compare/base...head
   const compareMatch = path.match(/^([^/]+)\/([^/]+)\/compare\/([^.]+)\.\.\.(.+)$/)
-  if (compareMatch) {
+  if (compareMatch && compareMatch[1] && compareMatch[2] && compareMatch[3] && compareMatch[4]) {
     return {
       type: "compare",
       owner: compareMatch[1],

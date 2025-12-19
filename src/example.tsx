@@ -1,12 +1,12 @@
 import { structuredPatch } from "diff";
 import {
-  createRoot,
+  render,
   useKeyboard,
-  useOnResize,
+  onResize,
   useRenderer,
   useTerminalDimensions,
 } from "@opentui/solid";
-import { createCliRenderer, MacOSScrollAccel } from "@opentui/core";
+import { MacOSScrollAccel } from "@opentui/core";
 import { createSignal, type JSX } from "solid-js";
 import {
   ErrorBoundary,
@@ -16,11 +16,11 @@ import {
 
 function App(): JSX.Element {
   const renderer = useRenderer();
-  const { width: initialWidth } = useTerminalDimensions();
-  const [width, setWidth] = createSignal(initialWidth);
+  const terminalDimensions = useTerminalDimensions();
+  const [width, setWidth] = createSignal(terminalDimensions().width);
   const scrollAcceleration = new MacOSScrollAccel();
 
-  useOnResize((newWidth: number) => {
+  onResize((newWidth: number) => {
     setWidth(newWidth);
   });
 
@@ -160,9 +160,8 @@ const hunks = structuredPatch(
   { context: 3, ignoreWhitespace: true, stripTrailingCr: true },
 ).hunks;
 
-const renderer = await createCliRenderer();
-createRoot(renderer).render(
+await render(() => (
   <ErrorBoundary>
     <App />
   </ErrorBoundary>
-);
+));

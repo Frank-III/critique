@@ -1,5 +1,5 @@
-import { createCliRenderer, RGBA } from "@opentui/core";
-import { createRoot } from "@opentui/solid";
+import { RGBA } from "@opentui/core";
+import { render } from "@opentui/solid";
 import { For, type JSX } from "solid-js";
 import { createHighlighter, type GrammarState, type ThemedToken } from "shiki";
 import { createMonochromeTheme } from "./monochrome";
@@ -129,9 +129,9 @@ function HighlightedCode(): JSX.Element {
                   }
 
                   return (
-                    <span fg={fg} bg={bg}>
+                    <text fg={fg} bg={bg}>
                       {token.content}
-                    </span>
+                    </text>
                   );
                 }}
               </For>
@@ -143,5 +143,4 @@ function HighlightedCode(): JSX.Element {
   );
 }
 
-const renderer = await createCliRenderer();
-createRoot(renderer).render(<HighlightedCode />);
+await render(() => <HighlightedCode />);

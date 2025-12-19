@@ -1,17 +1,16 @@
 #!/usr/bin/env bun
 import { cac } from "cac";
-import { FileEditPreviewTitle, FileEditPreview } from "./diff.tsx";
 import {
-  createRoot,
+  render,
+  onResize,
   useKeyboard,
-  useOnResize,
   useRenderer,
   useTerminalDimensions,
 } from "@opentui/solid";
 import { createSignal, createEffect, onMount, onCleanup, For, Show, type JSX } from "solid-js";
 import { exec, execSync } from "child_process";
 import { promisify } from "util";
-import { createCliRenderer, MacOSScrollAccel } from "@opentui/core";
+import { createCliRenderer, MacOSScrollAccel, RGBA, type CliRendererConfig } from "@opentui/core";
 import fs from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -34,15 +33,92 @@ const IGNORED_FILES = [
 
 const BACKGROUND_COLOR = "#0f0f0f";
 
-function getFileName(file: { oldFileName?: string; newFileName?: string }): string {
-  const newName = file.newFileName;
-  const oldName = file.oldFileName;
+// Theme colors for diff
+const ADDED_BG = RGBA.fromHex("#0d2818");
+const REMOVED_BG = RGBA.fromHex("#2d0f0f");
+const ADDED_LINE_NUMBER_BG = RGBA.fromHex("#1a4d2e");
+const REMOVED_LINE_NUMBER_BG = RGBA.fromHex("#4d1a1a");
+const LINE_NUMBER_BG = RGBA.fromHex("#0a0a0a");
+const LINE_NUMBER_FG = RGBA.fromHex("#666666");
 
-  // Filter out /dev/null which appears for new/deleted files
-  if (newName && newName !== "/dev/null") return newName;
-  if (oldName && oldName !== "/dev/null") return oldName;
+interface ParsedFile {
+  fileName: string;
+  diff: string;
+  additions: number;
+  deletions: number;
+}
 
-  return "unknown";
+function parseGitDiff(gitDiff: string): ParsedFile[] {
+  const files: ParsedFile[] = [];
+
+  // Split by file headers
+  const fileChunks = gitDiff.split(/(?=^diff --git )/gm).filter(chunk => chunk.trim());
+
+  for (const chunk of fileChunks) {
+    // Extract filename from the diff header
+    const headerMatch = chunk.match(/^diff --git a\/(.+?) b\/(.+?)$/m);
+    if (!headerMatch) continue;
+
+    const fileName = headerMatch[2] || headerMatch[1] || "unknown";
+    const baseName = fileName.split("/").pop() || "";
+
+    // Skip ignored files
+    if (IGNORED_FILES.includes(baseName) || baseName.endsWith(".lock")) {
+      continue;
+    }
+
+    // Count additions and deletions
+    const lines = chunk.split("\n");
+    let additions = 0;
+    let deletions = 0;
+
+    for (const line of lines) {
+      if (line.startsWith("+") && !line.startsWith("+++")) additions++;
+      if (line.startsWith("-") && !line.startsWith("---")) deletions++;
+    }
+
+    // Skip files with too many lines
+    if (additions + deletions > 6000) continue;
+
+    files.push({
+      fileName,
+      diff: chunk,
+      additions,
+      deletions,
+    });
+  }
+
+  // Sort by size (smaller first)
+  return files.sort((a, b) => (a.additions + a.deletions) - (b.additions + b.deletions));
+}
+
+function detectFiletype(fileName: string): string {
+  const ext = fileName.split(".").pop()?.toLowerCase();
+  const mapping: Record<string, string> = {
+    ts: "typescript",
+    tsx: "tsx",
+    js: "javascript",
+    jsx: "jsx",
+    json: "json",
+    md: "markdown",
+    py: "python",
+    rs: "rust",
+    go: "go",
+    java: "java",
+    c: "c",
+    cpp: "cpp",
+    h: "c",
+    hpp: "cpp",
+    css: "css",
+    html: "html",
+    yaml: "yaml",
+    yml: "yaml",
+    toml: "toml",
+    sh: "bash",
+    bash: "bash",
+    sql: "sql",
+  };
+  return mapping[ext || ""] || "text";
 }
 
 function execSyncWithError(
@@ -78,24 +154,20 @@ class ScrollAcceleration {
 const [currentFileIndex, setCurrentFileIndex] = createSignal(0);
 
 interface AppProps {
-  parsedFiles: Array<{
-    oldFileName?: string;
-    newFileName?: string;
-    hunks: any[];
-  }>;
+  files: ParsedFile[];
 }
 
 function App(props: AppProps): JSX.Element {
-  const { width: initialWidth } = useTerminalDimensions();
-  const [width, setWidth] = createSignal(initialWidth);
+  const dimensions = useTerminalDimensions();
+  const [width, setWidth] = createSignal(dimensions().width);
   const scrollAcceleration = new ScrollAcceleration();
   const [showDropdown, setShowDropdown] = createSignal(false);
 
-  useOnResize((newWidth: number) => {
+  onResize((newWidth: number) => {
     setWidth(newWidth);
   });
 
-  const useSplitView = () => width() >= 100;
+  const useSplitView = () => width() >= 100 ? "split" : "unified";
 
   const renderer = useRenderer();
 
@@ -119,7 +191,6 @@ function App(props: AppProps): JSX.Element {
       process.exit(0);
     }
     if (key.option) {
-      console.log(key);
       if (key.eventType === "release") {
         scrollAcceleration.multiplier = 1;
       } else {
@@ -130,43 +201,19 @@ function App(props: AppProps): JSX.Element {
       setCurrentFileIndex((prev) => Math.max(0, prev - 1));
     }
     if (key.name === "right") {
-      setCurrentFileIndex((prev) => Math.min(props.parsedFiles.length - 1, prev + 1));
+      setCurrentFileIndex((prev) => Math.min(props.files.length - 1, prev + 1));
     }
   });
 
   // Ensure current index is valid
-  const validIndex = () => Math.min(currentFileIndex(), props.parsedFiles.length - 1);
-  const currentFile = () => props.parsedFiles[validIndex()];
+  const validIndex = () => Math.min(currentFileIndex(), props.files.length - 1);
+  const currentFile = () => props.files[validIndex()];
 
-  const fileName = () => {
-    const file = currentFile();
-    return file ? getFileName(file) : "unknown";
-  };
-
-  // Calculate additions and deletions
-  const stats = () => {
-    const file = currentFile();
-    if (!file) return { additions: 0, deletions: 0 };
-
-    let additions = 0;
-    let deletions = 0;
-    file.hunks.forEach((hunk: any) => {
-      hunk.lines.forEach((line: string) => {
-        if (line.startsWith("+")) additions++;
-        if (line.startsWith("-")) deletions++;
-      });
-    });
-    return { additions, deletions };
-  };
-
-  const dropdownOptions = () => props.parsedFiles.map((file, idx) => {
-    const name = getFileName(file);
-    return {
-      title: name,
-      value: String(idx),
-      keywords: name.split("/"),
-    };
-  });
+  const dropdownOptions = () => props.files.map((file, idx) => ({
+    title: file.fileName,
+    value: String(idx),
+    keywords: file.fileName.split("/"),
+  }));
 
   const handleFileSelect = (value: string) => {
     const index = parseInt(value, 10);
@@ -209,10 +256,10 @@ function App(props: AppProps): JSX.Element {
             <text fg="#ffffff">←</text>
             <box flexGrow={1} />
             <text onMouseDown={() => setShowDropdown(true)}>
-              {fileName().trim()}
+              {currentFile()!.fileName.trim()}
             </text>
-            <text fg="#00ff00"> +{stats().additions}</text>
-            <text fg="#ff0000">-{stats().deletions}</text>
+            <text fg="#00ff00"> +{currentFile()!.additions}</text>
+            <text fg="#ff0000"> -{currentFile()!.deletions}</text>
             <box flexGrow={1} />
             <text fg="#ffffff">→</text>
           </box>
@@ -235,14 +282,18 @@ function App(props: AppProps): JSX.Element {
             }}
             focused
           >
-            <box style={{ flexDirection: "column" }}>
-              <FileEditPreview
-                hunks={currentFile()!.hunks}
-                paddingLeft={0}
-                splitView={useSplitView()}
-                filePath={fileName()}
-              />
-            </box>
+            <diff
+              diff={currentFile()!.diff}
+              view={useSplitView()}
+              filetype={detectFiletype(currentFile()!.fileName)}
+              showLineNumbers={true}
+              addedBg={ADDED_BG}
+              removedBg={REMOVED_BG}
+              addedLineNumberBg={ADDED_LINE_NUMBER_BG}
+              removedLineNumberBg={REMOVED_LINE_NUMBER_BG}
+              lineNumberBg={LINE_NUMBER_BG}
+              lineNumberFg={LINE_NUMBER_FG}
+            />
           </scrollbox>
 
           {/* Bottom navigation */}
@@ -252,7 +303,7 @@ function App(props: AppProps): JSX.Element {
             <box flexGrow={1} />
             <text fg="#ffffff">ctrl p</text>
             <text fg="#666666"> select file </text>
-            <text fg="#666666">({validIndex() + 1}/{props.parsedFiles.length})</text>
+            <text fg="#666666">({validIndex() + 1}/{props.files.length})</text>
             <box flexGrow={1} />
             <text fg="#666666">next file </text>
             <text fg="#ffffff">→</text>
@@ -262,8 +313,6 @@ function App(props: AppProps): JSX.Element {
     </Show>
   );
 }
-
-
 
 cli
   .command(
@@ -276,25 +325,16 @@ cli
   .action(async (ref, options) => {
     try {
       const gitCommand = (() => {
-        if (options.staged) return "git diff --cached --no-prefix";
-        if (options.commit) return `git show ${options.commit} --no-prefix`;
-        if (ref) return `git show ${ref} --no-prefix`;
-        return "git add -N . && git diff --no-prefix";
+        if (options.staged) return "git diff --cached";
+        if (options.commit) return `git show ${options.commit}`;
+        if (ref) return `git show ${ref}`;
+        return "git add -N . && git diff";
       })();
-
-      const [diffModule, { parsePatch }] = await Promise.all([
-        import("./diff.tsx"),
-        import("diff"),
-      ]);
 
       const shouldWatch = options.watch && !ref && !options.commit;
 
       function AppWithWatch(): JSX.Element {
-        const [parsedFiles, setParsedFiles] = createSignal<Array<{
-          oldFileName?: string;
-          newFileName?: string;
-          hunks: any[];
-        }> | null>(null);
+        const [files, setFiles] = createSignal<ParsedFile[] | null>(null);
 
         onMount(() => {
           const fetchDiff = async () => {
@@ -304,33 +344,14 @@ cli
               });
 
               if (!gitDiff.trim()) {
-                setParsedFiles([]);
+                setFiles([]);
                 return;
               }
 
-              const files = parsePatch(gitDiff);
-
-              const filteredFiles = files.filter((file) => {
-                const fileName = getFileName(file);
-                const baseName = fileName.split("/").pop() || "";
-
-                if (IGNORED_FILES.includes(baseName) || baseName.endsWith(".lock")) {
-                  return false;
-                }
-
-                const totalLines = file.hunks.reduce((sum, hunk) => sum + hunk.lines.length, 0);
-                return totalLines <= 6000;
-              });
-
-              const sortedFiles = filteredFiles.sort((a, b) => {
-                const aSize = a.hunks.reduce((sum, hunk) => sum + hunk.lines.length, 0);
-                const bSize = b.hunks.reduce((sum, hunk) => sum + hunk.lines.length, 0);
-                return aSize - bSize;
-              });
-
-              setParsedFiles(sortedFiles);
+              const parsedFiles = parseGitDiff(gitDiff);
+              setFiles(parsedFiles);
             } catch (error) {
-              setParsedFiles([]);
+              setFiles([]);
             }
           };
 
@@ -369,18 +390,18 @@ cli
 
         // Ensure currentFileIndex stays valid when files change
         createEffect(() => {
-          const files = parsedFiles();
-          if (files && files.length > 0) {
+          const f = files();
+          if (f && f.length > 0) {
             const idx = currentFileIndex();
-            if (idx >= files.length) {
-              setCurrentFileIndex(files.length - 1);
+            if (idx >= f.length) {
+              setCurrentFileIndex(f.length - 1);
             }
           }
         });
 
         return (
           <Show
-            when={parsedFiles() !== null}
+            when={files() !== null}
             fallback={
               <box style={{ padding: 1, backgroundColor: BACKGROUND_COLOR }}>
                 <text>Loading...</text>
@@ -388,27 +409,20 @@ cli
             }
           >
             <Show
-              when={parsedFiles()!.length > 0}
+              when={files()!.length > 0}
               fallback={
                 <box style={{ padding: 1, backgroundColor: BACKGROUND_COLOR }}>
                   <text>No changes to display</text>
                 </box>
               }
             >
-              <App parsedFiles={parsedFiles()!} />
+              <App files={files()!} />
             </Show>
           </Show>
         );
       }
 
-      const { ErrorBoundary } = diffModule;
-
-      const renderer = await createCliRenderer();
-      createRoot(renderer).render(
-        <ErrorBoundary>
-          <AppWithWatch />
-        </ErrorBoundary>
-      );
+      await render(() => <AppWithWatch />);
     } catch (error) {
       console.error("Error getting git diff:", error);
       process.exit(1);
@@ -426,11 +440,10 @@ cli
     }
 
     try {
-      const [localContent, remoteContent, diffModule, { structuredPatch }] =
+      const [localContent, remoteContent, { structuredPatch }] =
         await Promise.all([
           fs.readFileSync(local, "utf-8"),
           fs.readFileSync(remote, "utf-8"),
-          import("./diff.tsx"),
           import("diff"),
         ]);
 
@@ -448,14 +461,27 @@ cli
         process.exit(0);
       }
 
-      const { ErrorBoundary } = diffModule;
+      // Reconstruct a diff string from the patch
+      const diffLines = [
+        `diff --git a/${local} b/${remote}`,
+        `--- a/${local}`,
+        `+++ b/${remote}`,
+      ];
 
-      const renderer = await createCliRenderer();
-      createRoot(renderer).render(
-        <ErrorBoundary>
-          <App parsedFiles={[patch]} />
-        </ErrorBoundary>
-      );
+      for (const hunk of patch.hunks) {
+        diffLines.push(`@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@`);
+        diffLines.push(...hunk.lines);
+      }
+
+      const diffString = diffLines.join("\n");
+      const files: ParsedFile[] = [{
+        fileName: remote,
+        diff: diffString,
+        additions: patch.hunks.reduce((acc, h) => acc + h.lines.filter(l => l.startsWith("+")).length, 0),
+        deletions: patch.hunks.reduce((acc, h) => acc + h.lines.filter(l => l.startsWith("-")).length, 0),
+      }];
+
+      await render(() => <App files={files} />);
     } catch (error) {
       console.error("Error displaying diff:", error);
       process.exit(1);
@@ -647,8 +673,7 @@ cli
         );
       }
 
-      const renderer = await createCliRenderer();
-      createRoot(renderer).render(<PickApp files={files} branch={branch} />);
+      await render(() => <PickApp files={files} branch={branch} />);
     } catch (error) {
       console.error(
         `Error: ${error instanceof Error ? error.message : String(error)}`,
@@ -691,10 +716,10 @@ cli
     } else {
       // Get diff from git
       const gitCommand = (() => {
-        if (options.staged) return "git diff --cached --no-prefix";
-        if (options.commit) return `git show ${options.commit} --no-prefix`;
-        if (ref) return `git show ${ref} --no-prefix`;
-        return "git add -N . && git diff --no-prefix";
+        if (options.staged) return "git diff --cached";
+        if (options.commit) return `git show ${options.commit}`;
+        if (ref) return `git show ${ref}`;
+        return "git add -N . && git diff";
       })();
 
       if (!options.stdout) {
@@ -838,105 +863,63 @@ cli
     const cols = parseInt(options.cols) || 120;
     const rows = parseInt(options.rows) || 40;
 
-    const [diffModule, { parsePatch }] = await Promise.all([
-      import("./diff.tsx"),
-      import("diff"),
-    ]);
-
     const gitDiff = fs.readFileSync(diffFile, "utf-8");
-    const files = parsePatch(gitDiff);
+    const files = parseGitDiff(gitDiff);
 
-    const filteredFiles = files.filter((file) => {
-      const fileName = getFileName(file);
-      const baseName = fileName.split("/").pop() || "";
-      if (IGNORED_FILES.includes(baseName) || baseName.endsWith(".lock")) {
-        return false;
-      }
-      const totalLines = file.hunks.reduce((sum, hunk) => sum + hunk.lines.length, 0);
-      return totalLines <= 6000;
-    });
-
-    const sortedFiles = filteredFiles.sort((a, b) => {
-      const aSize = a.hunks.reduce((sum, hunk) => sum + hunk.lines.length, 0);
-      const bSize = b.hunks.reduce((sum, hunk) => sum + hunk.lines.length, 0);
-      return aSize - bSize;
-    });
-
-    if (sortedFiles.length === 0) {
+    if (files.length === 0) {
       console.log("No files to display");
       process.exit(0);
     }
-
-    const { FileEditPreview, ErrorBoundary } = diffModule;
 
     // Override terminal size
     process.stdout.columns = cols;
     process.stdout.rows = rows;
 
-    const renderer = await createCliRenderer({
-      exitOnCtrlC: false,
-      useAlternateScreen: false,
-    });
-
-    // Track if we've rendered once
-    let hasRendered = false;
-    const originalRequestRender = renderer.root.requestRender.bind(renderer.root);
-    renderer.root.requestRender = function() {
-      if (hasRendered) return; // Skip subsequent renders
-      hasRendered = true;
-      originalRequestRender();
-      // Exit after the first render completes
-      setTimeout(() => {
-        renderer.destroy();
-        process.exit(0);
-      }, 100);
-    };
-
     // Use unified diff for narrow viewports (mobile), split view for wider ones
-    const useSplitView = cols >= 150;
+    const useSplitView = cols >= 150 ? "split" : "unified";
 
-    // Static component - no hooks that cause re-renders
+    // Static component - renders once and exits
     function WebApp(): JSX.Element {
+      onMount(() => {
+        // Exit after the first render completes
+        setTimeout(() => {
+          process.exit(0);
+        }, 100);
+      });
+
       return (
         <box style={{ flexDirection: "column", height: "100%", padding: 1, backgroundColor: BACKGROUND_COLOR }}>
-          <For each={sortedFiles}>
-            {(file) => {
-              const fileName = getFileName(file);
-              let additions = 0;
-              let deletions = 0;
-              file.hunks.forEach((hunk: any) => {
-                hunk.lines.forEach((line: string) => {
-                  if (line.startsWith("+")) additions++;
-                  if (line.startsWith("-")) deletions++;
-                });
-              });
-
-              return (
-                <box style={{ flexDirection: "column", marginBottom: 2 }}>
-                  <box style={{ paddingBottom: 1, paddingLeft: 1, paddingRight: 1, flexShrink: 0, flexDirection: "row", alignItems: "center" }}>
-                    <text>{fileName.trim()}</text>
-                    <text fg="#00ff00"> +{additions}</text>
-                    <text fg="#ff0000">-{deletions}</text>
-                  </box>
-                  <FileEditPreview
-                    hunks={file.hunks}
-                    paddingLeft={0}
-                    splitView={useSplitView}
-                    filePath={fileName}
-                  />
+          <For each={files}>
+            {(file) => (
+              <box style={{ flexDirection: "column", marginBottom: 2 }}>
+                <box style={{ paddingBottom: 1, paddingLeft: 1, paddingRight: 1, flexShrink: 0, flexDirection: "row", alignItems: "center" }}>
+                  <text>{file.fileName.trim()}</text>
+                  <text fg="#00ff00"> +{file.additions}</text>
+                  <text fg="#ff0000"> -{file.deletions}</text>
                 </box>
-              );
-            }}
+                <diff
+                  diff={file.diff}
+                  view={useSplitView}
+                  filetype={detectFiletype(file.fileName)}
+                  showLineNumbers={true}
+                  addedBg={ADDED_BG}
+                  removedBg={REMOVED_BG}
+                  addedLineNumberBg={ADDED_LINE_NUMBER_BG}
+                  removedLineNumberBg={REMOVED_LINE_NUMBER_BG}
+                  lineNumberBg={LINE_NUMBER_BG}
+                  lineNumberFg={LINE_NUMBER_FG}
+                />
+              </box>
+            )}
           </For>
         </box>
       );
     }
 
-    createRoot(renderer).render(
-      <ErrorBoundary>
-        <WebApp />
-      </ErrorBoundary>
-    );
+    await render(() => <WebApp />, {
+      exitOnCtrlC: false,
+      useAlternateScreen: false,
+    });
   });
 
 cli.help();

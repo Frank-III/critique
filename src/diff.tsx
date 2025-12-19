@@ -121,7 +121,7 @@ function renderHighlightedTokens(tokens: ThemedToken[]): JSX.Element {
         {(token) => {
           const color = token.color;
           const fg = color ? RGBA.fromHex(color) : undefined;
-          return <span fg={fg}>{token.content}</span>;
+          return <text fg={fg}>{token.content}</text>;
         }}
       </For>
     </>
@@ -483,13 +483,13 @@ const StructuredDiff = (props: {
               {(part) => {
                 if (part.removed) {
                   return (
-                    <span bg={RGBA.fromInts(255, 50, 50, 100)}>
+                    <text bg={RGBA.fromInts(255, 50, 50, 100)}>
                       {part.value}
-                    </span>
+                    </text>
                   );
                 }
                 if (!part.added) {
-                  return <span>{part.value}</span>;
+                  return <text>{part.value}</text>;
                 }
                 return null;
               }}
@@ -543,13 +543,13 @@ const StructuredDiff = (props: {
               {(part) => {
                 if (part.added) {
                   return (
-                    <span bg={RGBA.fromInts(0, 200, 0, 100)}>
+                    <text bg={RGBA.fromInts(0, 200, 0, 100)}>
                       {part.value}
-                    </span>
+                    </text>
                   );
                 }
                 if (!part.removed) {
-                  return <span>{part.value}</span>;
+                  return <text>{part.value}</text>;
                 }
                 return null;
               }}
