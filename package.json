@@ -10,17 +10,16 @@
     "cli:watch": "bun --watch src/cli.tsx",
     "prepublishonly": "tsc",
     "example": "bun --watch src/example.tsx",
-    "worker:dev": "wrangler dev",
-    "worker:deploy": "wrangler deploy"
+    "dev": "vercel dev",
+    "deploy": "vercel deploy",
+    "build": "bun install"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20250525.0",
     "@types/bun": "1.3.1",
-    "e2b": "^1.0.0",
     "hono": "^4.7.10",
     "node-pty": "^1.0.0",
     "typescript": "^5.9.3",
-    "wrangler": "^4.19.1"
+    "vercel": "^41.0.0"
   },
   "dependencies": {
     "@xmorse/bun-pty": "0.4.0",
