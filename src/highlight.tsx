@@ -1,6 +1,6 @@
 import { createCliRenderer, RGBA } from "@opentui/core";
-import { createRoot } from "@opentui/react";
-import * as React from "react";
+import { createRoot } from "@opentui/solid";
+import { For, type JSX } from "solid-js";
 import { createHighlighter, type GrammarState, type ThemedToken } from "shiki";
 import { createMonochromeTheme } from "./monochrome";
 import { createMonotoneTheme } from "./monotone";
@@ -101,40 +101,44 @@ for (let i = 0; i < lines.length; i++) {
   states[themeIndex] = highlighter.getLastGrammarState(result.tokens);
 }
 
-function HighlightedCode() {
+function HighlightedCode(): JSX.Element {
   return (
     <box style={{ flexDirection: "column", padding: 2 }}>
-      {highlightedLines.map((line, lineIdx) => {
-        const themeIndex = lineThemes[lineIdx];
-        const isGreenTheme = themeIndex === 0;
-        const isRedTheme = themeIndex === 2;
+      <For each={highlightedLines}>
+        {(line, lineIdx) => {
+          const themeIndex = lineThemes[lineIdx()];
+          const isGreenTheme = themeIndex === 0;
+          const isRedTheme = themeIndex === 2;
 
-        return (
-          <text key={lineIdx} wrapMode="none">
-            {line.map((token, tokenIdx) => {
-              const hexColor = token.color?.slice(0, 7);
-              const fg = hexColor ? RGBA.fromHex(hexColor) : undefined;
+          return (
+            <text wrapMode="none">
+              <For each={line}>
+                {(token) => {
+                  const hexColor = token.color?.slice(0, 7);
+                  const fg = hexColor ? RGBA.fromHex(hexColor) : undefined;
 
-              const shouldHighlight = token.content.trim() && Math.random() > 0.7;
-              let bg: RGBA | undefined;
+                  const shouldHighlight = token.content.trim() && Math.random() > 0.7;
+                  let bg: RGBA | undefined;
 
-              if (shouldHighlight) {
-                if (isGreenTheme) {
-                  bg = RGBA.fromHex("#1a2a1a");
-                } else if (isRedTheme) {
-                  bg = RGBA.fromHex("#2a1a1a");
-                }
-              }
+                  if (shouldHighlight) {
+                    if (isGreenTheme) {
+                      bg = RGBA.fromHex("#1a2a1a");
+                    } else if (isRedTheme) {
+                      bg = RGBA.fromHex("#2a1a1a");
+                    }
+                  }
 
-              return (
-                <span key={tokenIdx} fg={fg} bg={bg}>
-                  {token.content}
-                </span>
-              );
-            })}
-          </text>
-        );
-      })}
+                  return (
+                    <span fg={fg} bg={bg}>
+                      {token.content}
+                    </span>
+                  );
+                }}
+              </For>
+            </text>
+          );
+        }}
+      </For>
     </box>
   );
 }
